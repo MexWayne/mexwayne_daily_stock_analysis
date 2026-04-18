@@ -1746,6 +1746,78 @@ class SearchService:
             self.news_max_age_days,
             self.news_window_days,
         )
+
+    def _normalize_text_for_match(self, text: str) -> str:
+        return re.sub(r"\s+", "", (text or "").lower())
+
+
+    def _is_result_relevant_to_stock(
+        self,
+        result: SearchResult,
+        stock_code: str,
+        stock_name: str,
+        ) -> bool:
+        text = " ".join([
+            result.title or "",
+            result.snippet or "",
+            result.url or "",
+            result.source or "",
+        ]).lower()
+
+        stock_name_norm = (stock_name or "").strip().lower()
+        stock_code_norm = (stock_code or "").strip().lower()
+
+        # A股：名称或代码必须命中
+        if stock_name_norm and stock_name_norm in text:
+            return True
+        if stock_code_norm and stock_code_norm in text:
+            return True
+
+        return False
+
+
+    def _filter_relevant_results(
+        self,
+        response: "SearchResponse",
+        *,
+        stock_code: str,
+        stock_name: str,
+        max_results: int,
+        log_scope: str,
+    ) -> "SearchResponse":
+        """在已有 provider 返回结果上做股票主体相关性过滤。"""
+        if not response.success or not response.results:
+            return response
+    
+        filtered: List["SearchResult"] = []
+        dropped_irrelevant = 0
+    
+        for item in response.results:
+            if self._is_result_relevant_to_stock(item, stock_code, stock_name):
+                filtered.append(item)
+                if len(filtered) >= max_results:
+                    break
+            else:
+                dropped_irrelevant += 1
+    
+        if dropped_irrelevant:
+            logger.info(
+                "[相关性过滤] %s: provider=%s, total=%s, kept=%s, drop_irrelevant=%s",
+                log_scope,
+                response.provider,
+                len(response.results),
+                len(filtered),
+                dropped_irrelevant,
+            )
+    
+        return SearchResponse(
+            query=response.query,
+            results=filtered,
+            provider=response.provider,
+            success=response.success,
+            error_message=response.error_message,
+            search_time=response.search_time,
+        )
     
     @staticmethod
     def _is_foreign_stock(stock_code: str) -> bool:
@@ -2194,11 +2266,20 @@ class SearchService:
                     search_kwargs["topic"] = "news"
 
                 response = provider.search(query, provider_max_results, days=search_days, **search_kwargs)
-                filtered_response = self._filter_news_response(
+
+                date_filtered_response = self._filter_news_response(
                     response,
                     search_days=search_days,
+                    max_results=provider_max_results,
+                    log_scope=f"{stock_code}:{provider.name}:stock_news:date",
+                )
+
+                filtered_response = self._filter_relevant_results(
+                    date_filtered_response,
+                    stock_code=stock_code,
+                    stock_name=stock_name,
                     max_results=max_results,
-                    log_scope=f"{stock_code}:{provider.name}:stock_news",
+                    log_scope=f"{stock_code}:{provider.name}:stock_news:relevance",
                 )
                 had_provider_success = had_provider_success or bool(response.success)
 
@@ -2461,17 +2542,25 @@ class SearchService:
                     days=search_days,
                 )
             if dim['strict_freshness']:
-                filtered_response = self._filter_news_response(
+                intermediate_response = self._filter_news_response(
                     response,
                     search_days=search_days,
-                    max_results=target_per_dimension,
-                    log_scope=f"{stock_code}:{provider.name}:{dim['name']}",
+                    max_results=provider_max_results,
+                    log_scope=f"{stock_code}:{provider.name}:{dim['name']}:date",
                 )
             else:
-                filtered_response = self._normalize_and_limit_response(
+                intermediate_response = self._normalize_and_limit_response(
                     response,
-                    max_results=target_per_dimension,
+                    max_results=provider_max_results,
                 )
+
+            filtered_response = self._filter_relevant_results(
+                intermediate_response,
+                stock_code=stock_code,
+                stock_name=stock_name,
+                max_results=target_per_dimension,
+                log_scope=f"{stock_code}:{provider.name}:{dim['name']}:relevance",
+            )
             results[dim['name']] = filtered_response
             search_count += 1
             

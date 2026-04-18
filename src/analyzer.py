@@ -1502,7 +1502,12 @@ class GeminiAnalyzer:
 """
         if news_context:
             prompt += f"""
-以下是 **{stock_name}({code})** 近{news_window_days}日的新闻搜索结果，请重点提取：
+以下是 **{stock_name}({code})** 的分维度情报结果。
+
+### 严格字段映射规则（必须遵守）
+1. `dashboard.intelligence.latest_news`
+   - 只能使用 “📰 最新消息” 维度中的内容
+   - 如果“📰 最新消息”为空，必须输出“未检索到近{news_window_days}日的新闻搜索结果，请重点提取：
 1. 🚨 **风险警报**：减持、处罚、利空
 2. 🎯 **利好催化**：业绩、合同、政策
 3. 📊 **业绩预期**：年报预告、业绩快报
