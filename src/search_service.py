@@ -1788,10 +1788,10 @@ class SearchService:
         """在已有 provider 返回结果上做股票主体相关性过滤。"""
         if not response.success or not response.results:
             return response
-    
+
         filtered: List["SearchResult"] = []
         dropped_irrelevant = 0
-    
+
         for item in response.results:
             if self._is_result_relevant_to_stock(item, stock_code, stock_name):
                 filtered.append(item)
@@ -1799,7 +1799,7 @@ class SearchService:
                     break
             else:
                 dropped_irrelevant += 1
-    
+
         if dropped_irrelevant:
             logger.info(
                 "[相关性过滤] %s: provider=%s, total=%s, kept=%s, drop_irrelevant=%s",
@@ -1809,7 +1809,7 @@ class SearchService:
                 len(filtered),
                 dropped_irrelevant,
             )
-    
+
         return SearchResponse(
             query=response.query,
             results=filtered,
@@ -2449,7 +2449,7 @@ class SearchService:
             search_dimensions = [
                 {
                     'name': 'latest_news',
-                    'query': f"{stock_name} {stock_code} 最新 新闻 重大 事件",
+                    'query': f"{stock_name} 最新公告 最新新闻 一季报 年报 业绩",
                     'desc': '最新消息',
                     'tavily_topic': 'news',
                     'strict_freshness': True,
@@ -2495,7 +2495,7 @@ class SearchService:
         
         search_days = self._effective_news_window_days()
         target_per_dimension = 3
-        provider_max_results = self._provider_request_size(target_per_dimension)
+        provider_max_results = max(10, self._provider_request_size(target_per_dimension))
 
         logger.info(
             (
