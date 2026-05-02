@@ -156,7 +156,7 @@ class AnalysisReportSchema(BaseModel):
     company_highlights: Optional[str] = None
     news_summary: Optional[str] = None
     market_sentiment: Optional[str] = None
-    hot_topics: Optional[str] = None
+    hot_topics: Optional[List[str]] = None
 
     search_performed: Optional[bool] = None
     data_sources: Optional[str] = None

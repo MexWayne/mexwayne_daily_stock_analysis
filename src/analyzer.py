@@ -609,7 +609,7 @@ class GeminiAnalyzer:
     "company_highlights": "公司亮点/风险",
     "news_summary": "新闻摘要",
     "market_sentiment": "市场情绪",
-    "hot_topics": "相关热点",
+    "hot_topics": ["相关热点1", "相关热点2"],
 
     "search_performed": true/false,
     "data_sources": "数据来源说明"
