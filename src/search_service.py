@@ -1763,25 +1763,25 @@ class SearchService:
         title = self._normalize_text_for_match(result.title or "")
         snippet = self._normalize_text_for_match(result.snippet or "")
         url = self._normalize_text_for_match(result.url or "")
-    
+
         name = self._normalize_text_for_match(stock_name)
         code = self._normalize_text_for_match(stock_code)
-    
+
         if name and name in title:
             return True
         if code and code in title:
             return True
-    
+
         if name and name in snippet:
             return True
         if code and code in snippet:
             return True
-    
+
         if name and name in url:
             return True
         if code and code in url:
             return True
-    
+
         logger.debug(
             "[相关性过滤-丢弃] stock=%s(%s), title=%s, source=%s, url=%s",
             stock_name,
@@ -1808,6 +1808,7 @@ class SearchService:
 
         filtered: List["SearchResult"] = []
         dropped_irrelevant = 0
+        dropped_samples = []
 
         for item in response.results:
             if self._is_result_relevant_to_stock(item, stock_code, stock_name):
@@ -1816,6 +1817,13 @@ class SearchService:
                     break
             else:
                 dropped_irrelevant += 1
+                if len(dropped_samples) < 3:
+                    dropped_samples.append({
+                        "title": (item.title or "")[:120],
+                        "source": item.source or "",
+                        "url": (item.url or "")[:200],
+                        "snippet": (item.snippet or "")[:160],
+                    })
 
         if dropped_irrelevant:
             logger.info(
@@ -1826,6 +1834,16 @@ class SearchService:
                 len(filtered),
                 dropped_irrelevant,
             )
+
+            for idx, sample in enumerate(dropped_samples, 1):
+                logger.info(
+                    "[相关性过滤-丢弃样本%d] %s | source=%s | url=%s | snippet=%s",
+                    idx,
+                    sample["title"],
+                    sample["source"],
+                    sample["url"],
+                    sample["snippet"],
+                )
 
         return SearchResponse(
             query=response.query,
@@ -2466,14 +2484,20 @@ class SearchService:
             search_dimensions = [
                 {
                     'name': 'latest_news',
-                    'query': f"{stock_name} 最新公告 最新新闻 一季报 年报 业绩",
+                    'query': (
+                        f"{stock_name} 指数 ETF 最新公告 净值 跟踪"
+                        if is_index_etf else f"{stock_name} A股 中国 公司公告 最新公告 深交所 巨潮资讯 一季报 财报"
+                    ),
                     'desc': '最新消息',
-                    'tavily_topic': 'news',
-                    'strict_freshness': True,
+                    'tavily_topic': None if is_index_etf else 'news',
+                    'strict_freshness': not is_index_etf,
                 },
                 {
                     'name': 'market_analysis',
-                    'query': f"{stock_name} 研报 目标价 评级 深度分析",
+                    'query': (
+                        f"{stock_name} 指数 ETF 资金流向 跟踪误差 规模 份额"
+                        if is_index_etf else f"{stock_name} 研报 目标价 评级 深度分析"
+                    ),
                     'desc': '机构分析',
                     'tavily_topic': None,
                     'strict_freshness': False,
@@ -2482,7 +2506,7 @@ class SearchService:
                     'name': 'risk_check',
                     'query': (
                         f"{stock_name} 指数走势 跟踪误差 净值 表现"
-                        if is_index_etf else f"{stock_name} 减持 处罚 违规 诉讼 利空 风险"
+                        if is_index_etf else f"{stock_name} A股 中国 减持 问询函 监管函 处罚 诉讼 风险 深交所"
                     ),
                     'desc': '风险排查',
                     'tavily_topic': None if is_index_etf else 'news',
@@ -2491,7 +2515,7 @@ class SearchService:
                 {
                     'name': 'earnings',
                     'query': (
-                        f"{stock_name} 指数成分 净值 跟踪表现"
+                        f"{stock_name} 指数 ETF 跟踪标的 权重股 调仓"
                         if is_index_etf else f"{stock_name} 业绩预告 财报 营收 净利润 同比增长"
                     ),
                     'desc': '业绩预期',
@@ -2501,7 +2525,7 @@ class SearchService:
                 {
                     'name': 'industry',
                     'query': (
-                        f"{stock_name} 指数成分股 行业配置 权重"
+                        f"{stock_name} 指数 ETF 成分股 行业分布 权重结构"
                         if is_index_etf else f"{stock_name} 所在行业 竞争对手 市场份额 行业前景"
                     ),
                     'desc': '行业分析',
