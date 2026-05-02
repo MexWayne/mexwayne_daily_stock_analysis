@@ -1505,18 +1505,37 @@ class GeminiAnalyzer:
 以下是 **{stock_name}({code})** 的分维度情报结果。
 
 ### 严格字段映射规则（必须遵守）
+
 1. `dashboard.intelligence.latest_news`
    - 只能使用 “📰 最新消息” 维度中的内容
-   - 如果“📰 最新消息”为空，必须输出“未检索到近{news_window_days}日的新闻搜索结果，请重点提取：
-1. 🚨 **风险警报**：减持、处罚、利空
-2. 🎯 **利好催化**：业绩、合同、政策
-3. 📊 **业绩预期**：年报预告、业绩快报
-4. 🕒 **时间规则（强制）**：
-   - 输出到 `risk_alerts` / `positive_catalysts` / `latest_news` 的每一条都必须带具体日期（YYYY-MM-DD）
-   - 超出近{news_window_days}日窗口的新闻一律忽略
-   - 时间未知、无法确定发布日期的新闻一律忽略
+   - 如果“📰 最新消息”为空，必须输出：`未检索到近{news_window_days}日合规新闻`
+   - 严禁从 “📈 机构分析 / 📊 业绩预期 / 🏭 行业分析” 中抽取内容填入 `latest_news`
 
-```
+2. `dashboard.intelligence.risk_alerts`
+   - 只能使用 “⚠️ 风险排查” 维度中的内容
+   - 如果“⚠️ 风险排查”为空，必须输出空数组 `[]`
+   - 严禁从其他维度补充风险项
+
+3. `dashboard.intelligence.positive_catalysts`
+   - 只能使用 “📰 最新消息” 维度中，且满足时间规则的明确利好
+   - 如果没有满足条件的内容，必须输出空数组 `[]`
+   - 严禁从 “📈 机构分析 / 📊 业绩预期 / 🏭 行业分析 / 股吧传闻” 中提炼利好填入
+
+4. `dashboard.intelligence.earnings_outlook`
+   - 只能基于 “📊 业绩预期” 维度中的内容
+   - 若数据不足，必须写：`数据缺失，无法判断`
+
+5. `hot_topics`
+   - 不得使用股吧传闻、未证实借壳/重组猜测、论坛帖子标题作为确定性热点
+   - 未证实内容必须忽略，不可写入最终 JSON
+
+### 时间规则（强制）
+- 输出到 `latest_news` / `risk_alerts` / `positive_catalysts` 的每一条内容都必须来自近{news_window_days}日内的明确事件
+- 时间未知、无法确认日期、明显超出近{news_window_days}日窗口的内容，一律忽略
+- 宁可留空，也不要把旧内容或传闻冒充为近期消息
+
+### 原始情报输入（只可按上述字段边界使用）
+```text
 {news_context}
 ```
 """
