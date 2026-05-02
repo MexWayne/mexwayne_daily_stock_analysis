@@ -1756,23 +1756,40 @@ class SearchService:
         result: SearchResult,
         stock_code: str,
         stock_name: str,
-        ) -> bool:
-        text = " ".join([
-            result.title or "",
-            result.snippet or "",
-            result.url or "",
-            result.source or "",
-        ]).lower()
-
-        stock_name_norm = (stock_name or "").strip().lower()
-        stock_code_norm = (stock_code or "").strip().lower()
-
-        # A股：名称或代码必须命中
-        if stock_name_norm and stock_name_norm in text:
+    ) -> bool:
+        """
+        判断搜索结果是否与目标股票相关。
+        """
+        title = self._normalize_text_for_match(result.title or "")
+        snippet = self._normalize_text_for_match(result.snippet or "")
+        url = self._normalize_text_for_match(result.url or "")
+    
+        name = self._normalize_text_for_match(stock_name)
+        code = self._normalize_text_for_match(stock_code)
+    
+        if name and name in title:
             return True
-        if stock_code_norm and stock_code_norm in text:
+        if code and code in title:
             return True
-
+    
+        if name and name in snippet:
+            return True
+        if code and code in snippet:
+            return True
+    
+        if name and name in url:
+            return True
+        if code and code in url:
+            return True
+    
+        logger.debug(
+            "[相关性过滤-丢弃] stock=%s(%s), title=%s, source=%s, url=%s",
+            stock_name,
+            stock_code,
+            result.title[:80] if result.title else "",
+            result.source,
+            result.url[:120] if result.url else "",
+        )
         return False
 
 
