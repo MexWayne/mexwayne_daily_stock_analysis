@@ -558,6 +558,26 @@ class GeminiAnalyzer:
                 "avg_cost": 平均成本,
                 "concentration": 筹码集中度,
                 "chip_health": "健康/一般/警惕"
+            },
+            "candlestick": {
+                "current_candle": "当前K线类型",
+                "main_pattern": "主要K线/图形形态",
+                "pattern_strength": "强/中/弱/无",
+                "volume_confirmed": true,
+                "kline_meaning": "K线结构含义",
+                "evidence": {
+                    "patterns_count": 0,
+                    "patterns": [],
+                    "summary": "",
+                    "current_candle": {},
+                    "recent_candles": [],
+                    "volume_context": {
+                        "volume_ratio_vs_5d": 0,
+                        "volume_ratio_vs_20d": 0,
+                        "volume_status": "",
+                        "volume_confirmed": false
+                    }
+                }
             }
         },
 
@@ -603,7 +623,7 @@ class GeminiAnalyzer:
     "technical_analysis": "技术面综合分析",
     "ma_analysis": "均线系统分析",
     "volume_analysis": "量能分析",
-    "pattern_analysis": "K线形态分析",
+    "pattern_analysis": "必须基于 pattern_context / analyze_pattern 的程序化结果，说明当前K线形态、主要图形结构、量能确认情况、信号分歧和失效条件；不得凭空判断箱体/突破/反转",
     "fundamental_analysis": "基本面分析",
     "sector_position": "板块行业分析",
     "company_highlights": "公司亮点/风险",
@@ -708,6 +728,26 @@ class GeminiAnalyzer:
                 "avg_cost": 平均成本,
                 "concentration": 筹码集中度,
                 "chip_health": "健康/一般/警惕"
+            },
+            "candlestick": {
+                "current_candle": "当前K线类型",
+                "main_pattern": "主要K线/图形形态",
+                "pattern_strength": "强/中/弱/无",
+                "volume_confirmed": true,
+                "kline_meaning": "K线结构含义",
+                "evidence": {
+                    "patterns_count": 0,
+                    "patterns": [],
+                    "summary": "",
+                    "current_candle": {},
+                    "recent_candles": [],
+                    "volume_context": {
+                        "volume_ratio_vs_5d": 0,
+                        "volume_ratio_vs_20d": 0,
+                        "volume_status": "",
+                        "volume_confirmed": false
+                    }
+                }
             }
         },
 
@@ -753,7 +793,7 @@ class GeminiAnalyzer:
     "technical_analysis": "技术面综合分析",
     "ma_analysis": "均线系统分析",
     "volume_analysis": "量能分析",
-    "pattern_analysis": "K线形态分析",
+    "pattern_analysis": "必须基于 pattern_context / analyze_pattern 的程序化结果，说明当前K线形态、主要图形结构、量能确认情况、信号分歧和失效条件；不得凭空判断箱体/突破/反转",
     "fundamental_analysis": "基本面分析",
     "sector_position": "板块行业分析",
     "company_highlights": "公司亮点/风险",
@@ -1152,6 +1192,25 @@ class GeminiAnalyzer:
             else:
                 # 最后从映射表获取
                 name = STOCK_NAME_MAP.get(code, f'股票{code}')
+
+
+        # 自动补充K线形态识别上下文
+        # 说明：
+        # - _format_prompt() 已经会读取 context["pattern_context"]
+        # - 如果外部 pipeline 没有提前塞入，这里兜底计算一次
+        # - 如果外部已经提供 pattern_context，则不重复计算
+        if "pattern_context" not in context:
+            try:
+                from src.agent.tools.analysis_tools import _handle_analyze_pattern
+
+                context["pattern_context"] = _handle_analyze_pattern(code, days=60)
+                logger.info("[K线识别] 已补充 pattern_context: %s", code)
+            except Exception as exc:
+                logger.warning("[K线识别] pattern_context 生成失败: %s", exc, exc_info=True)
+                context["pattern_context"] = {
+                    "error": f"K线形态识别失败: {exc}"
+                }
+        
         
         # 如果模型不可用，返回默认结果
         if not self.is_available():
@@ -1225,6 +1284,27 @@ class GeminiAnalyzer:
                 result.market_snapshot = self._build_market_snapshot(context)
                 result.model_used = model_used
                 result.report_language = report_language
+
+                # 打印K线最终输出，确认模型是否真正写入 candlestick / pattern_analysis
+                try:
+                    dash = result.dashboard if isinstance(result.dashboard, dict) else {}
+                    dp = dash.get("data_perspective") if isinstance(dash.get("data_perspective"), dict) else {}
+                    candlestick = dp.get("candlestick")
+
+                    logger.info(
+                        "[K线输出] %s candlestick=%s",
+                        code,
+                        json.dumps(candlestick, ensure_ascii=False, default=str)[:1200]
+                        if candlestick is not None
+                        else None,
+                    )
+                    logger.info(
+                        "[K线输出] %s pattern_analysis=%s",
+                        code,
+                        (result.pattern_analysis or "")[:500],
+                    )
+                except Exception:
+                    logger.debug("[K线输出] 打印失败", exc_info=True)
 
                 # 内容完整性校验（可选）
                 if not config.report_integrity_enabled:
@@ -1468,6 +1548,49 @@ class GeminiAnalyzer:
 **风险因素**：
 {chr(10).join('- ' + r for r in trend.get('risk_factors', ['无'])) if trend.get('risk_factors') else '- 无'}
 """
+                
+
+        # 添加K线形态分析结果
+        pattern_context = context.get("pattern_context")
+        if isinstance(pattern_context, dict) and not pattern_context.get("error"):
+            prompt += f"""
+### K线结构与形态识别（程序计算结果，必须引用，不得编造）
+
+以下内容来自程序化 K线识别工具 `analyze_pattern`，不是模型自由判断：
+
+```json
+{json.dumps(pattern_context, ensure_ascii=False, indent=2)}
+```
+
+#### K线分析强制要求
+- `current_candle` 表示【今日K线】，必须优先用于判断今日K线类型、实体、上下影线。
+- `recent_candles` 表示最近5根K线，只能用于判断短期连续性和多空分歧。
+- `patterns` 表示程序识别到的最近形态，必须结合 `day_offset` 判断发生时间：
+  - `day_offset = 0`：今日形态
+  - `day_offset = -1`：前一交易日形态
+  - `day_offset = -2`：两日前或三根K线组合起点
+- 严禁把 `day_offset = -1/-2` 的形态写成“今日出现”。
+- `pattern_analysis` 必须同时说明：
+  1. 今日K线是什么；
+  2. 最近形态是什么；
+  3. 该形态发生在今日还是前几日；
+  4. 是否获得量能确认；
+  5. 与均线、RSI、MACD 是否存在信号分歧。
+- `dashboard.data_perspective.candlestick` 必须引用上方 K线识别结果。
+- 如果 `patterns_count = 0`，必须写“未发现明显K线形态”，不得强行判断突破、箱体或反转。
+- 判断“突破/箱体/反转/长上影/长下影/放量/缩量”时，必须有工具结果支持。
+- 判断量能确认时，优先引用 `volume_context.volume_ratio_vs_5d`、`volume_context.volume_ratio_vs_20d`、`volume_context.volume_status`。
+- 如果 `volume_context` 不存在或计算失败，必须写“量能确认数据缺失”，不得自行填 0 或编造放量/缩量。
+"""
+        elif isinstance(pattern_context, dict) and pattern_context.get("error"):
+            prompt += f"""
+### K线结构与形态识别
+
+数据缺失，无法进行K线形态识别。
+
+错误原因：{pattern_context.get("error")}
+"""
+
         
         # 添加昨日对比数据
         if 'yesterday' in context:

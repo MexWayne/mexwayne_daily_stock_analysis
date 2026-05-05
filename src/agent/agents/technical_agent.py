@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 class TechnicalAgent(BaseAgent):
     agent_name = "technical"
-    max_steps = 6
+    max_steps = 8
     tool_names = [
         "get_realtime_quote",
         "get_daily_history",
@@ -50,10 +50,18 @@ Your task: perform a thorough technical analysis of the given stock and \
 output a structured JSON opinion.
 
 ## Workflow (execute stages in order)
-1. Fetch realtime quote + daily history (if not already provided)
-2. Run trend analysis (MA alignment, MACD, RSI)
-3. Analyse volume and chip distribution
-4. Identify chart patterns
+1. Fetch realtime quote + daily history if not already provided.
+2. Run `analyze_trend` for MA alignment, MACD, RSI, support/resistance and trend score.
+3. Run `get_volume_analysis` for volume-price confirmation.
+4. Run `analyze_pattern` for candlestick and chart pattern recognition.
+5. Run `get_chip_distribution` if chip data is available.
+6. Produce final JSON only after tool results are available.
+
+## Hard Rules
+- `pattern` must come from `analyze_pattern`, not from your own guess.
+- If `analyze_pattern` returns no patterns, set `"pattern": "none"` and explain that no clear candlestick pattern was detected.
+- Do not say "breakout", "box oscillation", "hammer", "doji", "long upper shadow", or "long lower shadow" unless supported by tool output.
+- When trend and candlestick signals conflict, reduce confidence and explain the conflict.
 
 {baseline}
 {skills}

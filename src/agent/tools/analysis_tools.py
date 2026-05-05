@@ -390,8 +390,109 @@ def _handle_analyze_pattern(stock_code: str, days: int = 60) -> dict:
 
     def is_bearish(i):
         return c[i] < o[i]
+    
+    def candle_features(i):
+        full_range = max(h[i] - l[i], 1e-9)
+        bd = body(i)
+        us = upper_shadow(i)
+        ls = lower_shadow(i)
+
+        body_ratio = bd / full_range
+        upper_ratio = us / full_range
+        lower_ratio = ls / full_range
+
+        if body_ratio <= 0.1:
+            candle_type = "十字星"
+        elif is_bullish(i) and body_ratio >= 0.6:
+            candle_type = "大阳线"
+        elif is_bearish(i) and body_ratio >= 0.6:
+            candle_type = "大阴线"
+        elif is_bullish(i):
+            candle_type = "阳线"
+        elif is_bearish(i):
+            candle_type = "阴线"
+        else:
+            candle_type = "平盘线"
+
+        if upper_ratio >= 0.45 and body_ratio <= 0.35:
+            shadow_feature = "长上影"
+        elif lower_ratio >= 0.45 and body_ratio <= 0.35:
+            shadow_feature = "长下影"
+        elif upper_ratio >= 0.35 and lower_ratio >= 0.35:
+            shadow_feature = "上下影都较长"
+        else:
+            shadow_feature = "影线普通"
+
+        return {
+            "index": int(i),
+            "open": round(float(o[i]), 3),
+            "high": round(float(h[i]), 3),
+            "low": round(float(l[i]), 3),
+            "close": round(float(c[i]), 3),
+            "candle_type": candle_type,
+            "shadow_feature": shadow_feature,
+            "body_ratio": round(float(body_ratio), 3),
+            "upper_shadow_ratio": round(float(upper_ratio), 3),
+            "lower_shadow_ratio": round(float(lower_ratio), 3),
+            "body_size": round(float(bd), 3),
+            "upper_shadow": round(float(us), 3),
+            "lower_shadow": round(float(ls), 3),
+        }
+
 
     avg_body = sum(body(i) for i in range(n)) / n if n > 0 else 1
+
+    # --- Volume context for candlestick confirmation ---
+    volume_context = {}
+    if v is not None and len(v) > 0:
+        try:
+            latest_vol = float(v[-1])
+
+            prev5 = v[max(0, n - 6): n - 1]
+            prev20 = v[max(0, n - 21): n - 1]
+
+            avg_vol_5 = float(prev5.mean()) if len(prev5) > 0 else 0.0
+            avg_vol_20 = float(prev20.mean()) if len(prev20) > 0 else 0.0
+
+            volume_ratio_vs_5d = (
+                round(latest_vol / avg_vol_5, 2)
+                if avg_vol_5 > 0
+                else None
+            )
+            volume_ratio_vs_20d = (
+                round(latest_vol / avg_vol_20, 2)
+                if avg_vol_20 > 0
+                else None
+            )
+
+            if volume_ratio_vs_5d is None:
+                volume_status = "数据不足"
+            elif volume_ratio_vs_5d >= 1.5:
+                volume_status = "明显放量"
+            elif volume_ratio_vs_5d <= 0.7:
+                volume_status = "明显缩量"
+            else:
+                volume_status = "量能正常"
+
+            volume_context = {
+                "latest_volume": round(latest_vol, 2),
+                "avg_volume_5d_ex_today": round(avg_vol_5, 2),
+                "avg_volume_20d_ex_today": round(avg_vol_20, 2),
+                "volume_ratio_vs_5d": volume_ratio_vs_5d,
+                "volume_ratio_vs_20d": volume_ratio_vs_20d,
+                "volume_status": volume_status,
+                "volume_confirmed": bool(
+                    volume_ratio_vs_5d is not None and volume_ratio_vs_5d >= 1.2
+                ),
+                "note": "均量计算排除当日，用于判断今日K线是否获得量能确认",
+            }
+        except Exception as exc:
+            volume_context = {
+                "error": f"volume_context 计算失败: {exc}"
+            }
+
+
+
 
     # --- Single-candle patterns (last 3 days) ---
     for i in range(max(0, n - 3), n):
@@ -516,11 +617,22 @@ def _handle_analyze_pattern(stock_code: str, days: int = 60) -> dict:
             unique_patterns.append(p)
     unique_patterns = list(reversed(unique_patterns))
 
+
+    current_candle = candle_features(n - 1)
+    recent_candles = [
+        candle_features(i)
+        for i in range(max(0, n - 5), n)
+    ]
+
+
     return {
         "code": stock_code,
         "source": source,
         "period_days": len(df),
         "current_price": round(float(c[-1]), 2),
+        "current_candle": current_candle,
+        "recent_candles": recent_candles,
+        "volume_context": volume_context,
         "patterns_count": len(unique_patterns),
         "patterns": unique_patterns,
         "summary": (
