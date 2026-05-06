@@ -391,6 +391,47 @@ def _handle_analyze_pattern(stock_code: str, days: int = 60) -> dict:
     def is_bearish(i):
         return c[i] < o[i]
     
+
+    def _normalize_trade_date(value) -> str:
+        """把 trade_date/date/index 统一格式化为 YYYY-MM-DD 字符串。"""
+        if value is None:
+            return ""
+
+        try:
+            if hasattr(value, "strftime"):
+                return value.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+        s = str(value).strip()
+        if not s:
+            return ""
+
+        # 20260506 -> 2026-05-06
+        if len(s) == 8 and s.isdigit():
+            return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+
+        if "/" in s:
+            s = s.replace("/", "-")
+
+        # 2026-05-06 00:00:00 -> 2026-05-06
+        if len(s) >= 10 and s[4:5] == "-" and s[7:8] == "-":
+            return s[:10]
+
+        return s
+
+    def _get_row_trade_date(i: int) -> str:
+        """尽量从 df 的列或 index 中取真实交易日。"""
+        for col in ("trade_date", "date", "日期", "datetime", "time"):
+            if col in df.columns:
+                return _normalize_trade_date(df.iloc[i][col])
+
+        try:
+            return _normalize_trade_date(df.index[i])
+        except Exception:
+            return ""
+
+    
     def candle_features(i):
         full_range = max(h[i] - l[i], 1e-9)
         bd = body(i)
@@ -437,6 +478,7 @@ def _handle_analyze_pattern(stock_code: str, days: int = 60) -> dict:
             "body_size": round(float(bd), 3),
             "upper_shadow": round(float(us), 3),
             "lower_shadow": round(float(ls), 3),
+            "date": _get_row_trade_date(i),
         }
 
 
@@ -628,6 +670,8 @@ def _handle_analyze_pattern(stock_code: str, days: int = 60) -> dict:
     return {
         "code": stock_code,
         "source": source,
+        "kline_scope": "completed_daily",
+        "latest_trade_date": current_candle.get("date"),
         "period_days": len(df),
         "current_price": round(float(c[-1]), 2),
         "current_candle": current_candle,

@@ -1224,6 +1224,24 @@ class GeminiAnalyzer:
                     "analysis_mode": "unknown",
                     "mode_note": f"市场状态判断失败: {exc}",
                 }
+        
+        # 自动补充盘中K线结构：基于实时行情构造 forming candle
+        if "intraday_kline_context" not in context:
+            try:
+                context["intraday_kline_context"] = self._build_intraday_kline_context(context)
+                logger.info(
+                    "[盘中K线] %s intraday_kline_context=%s",
+                    code,
+                    context["intraday_kline_context"],
+                )
+            except Exception as exc:
+                logger.warning("[盘中K线] 构造失败: %s", exc, exc_info=True)
+                context["intraday_kline_context"] = {
+                    "available": False,
+                    "kline_scope": "intraday_forming",
+                    "error": f"盘中K线构造失败: {exc}",
+                }
+
 
 
         # 自动补充K线形态识别上下文
@@ -1322,6 +1340,16 @@ class GeminiAnalyzer:
                     dash = result.dashboard if isinstance(result.dashboard, dict) else {}
                     dp = dash.get("data_perspective") if isinstance(dash.get("data_perspective"), dict) else {}
                     candlestick = dp.get("candlestick")
+
+                    logger.info(
+                        "[盘中K线输入] %s intraday_kline_context=%s",
+                        code,
+                        json.dumps(
+                            context.get("intraday_kline_context"),
+                            ensure_ascii=False,
+                            default=str,
+                        )[:1200],
+                    )
 
                     logger.info(
                         "[K线输出] %s candlestick=%s",
@@ -1442,6 +1470,14 @@ class GeminiAnalyzer:
             quote_title = "最近可用行情"
             candle_label = "最近可用K线"
             action_time_rule = "市场状态未知，操作建议需保守处理。"
+        
+        # 盘中不能把 latest price 叫“收盘价”
+        if analysis_mode == "trading_intraday":
+            price_label = "最新价"
+        elif analysis_mode == "lunch_break":
+            price_label = "午间最新价"
+        else:
+            price_label = "收盘价"
 
         market_status_block = "\n---\n"
         if market_status:
@@ -1483,7 +1519,7 @@ class GeminiAnalyzer:
 ### {quote_title}
 | 指标 | 数值 |
 |------|------|
-| 收盘价 | {today.get('close', 'N/A')} 元 |
+| {price_label} | {today.get('close', 'N/A')} 元 |
 | 开盘价 | {today.get('open', 'N/A')} 元 |
 | 最高价 | {today.get('high', 'N/A')} 元 |
 | 最低价 | {today.get('low', 'N/A')} 元 |
@@ -1630,67 +1666,140 @@ class GeminiAnalyzer:
 """
                 
 
-        # 添加K线形态分析结果
+        # 添加K线形态分析结果：历史完整日K + 今日盘中K线
         pattern_context = context.get("pattern_context")
-        if isinstance(pattern_context, dict) and not pattern_context.get("error"):
-            prompt += f"""
+        intraday_kline_context = context.get("intraday_kline_context")
+
+        has_pattern_context = (
+            isinstance(pattern_context, dict)
+            and not pattern_context.get("error")
+        )
+        has_intraday_context = isinstance(intraday_kline_context, dict)
+
+        if has_pattern_context or has_intraday_context:
+            prompt += """
 ### K线结构与形态识别（程序计算结果，必须引用，不得编造）
 
-以下内容来自程序化 K线识别工具 `analyze_pattern`，不是模型自由判断：
+本节包含两类K线数据，必须严格区分：
 
-```json
-{json.dumps(pattern_context, ensure_ascii=False, indent=2)}
-```
-
-#### K线分析强制要求
-- 当前市场分析模式：`{analysis_mode}`。
-- `current_candle` 表示【{candle_label}】，必须优先用于判断K线类型、实体、上下影线。
-- `current_candle.date` 才是该K线对应的真实交易日，不得用自然运行日期替代。
-- 如果 `market_status.analysis_mode` 为 `non_trading_day` 或 `pre_market`，则 `current_candle` 必须解释为【最近可用交易日K线】，不得写成“今日盘中已经形成的K线”。
-- `recent_candles` 表示最近5根有效交易日K线，只能用于判断短期连续性和多空分歧。
-- `patterns` 表示程序识别到的最近形态，必须结合 `day_offset` 判断发生时间：
-  - `day_offset = 0`：最近可用交易日 / 当前K线对应日的形态
-  - `day_offset = -1`：前一交易日形态
-  - `day_offset = -2`：两日前或三根K线组合起点
-- 严禁把 `day_offset = -1/-2` 的形态写成“今日出现”。
-- `pattern_analysis` 必须同时说明：
-  1. 当前K线对应的真实交易日；
-  2. 当前K线是什么；
-  3. 最近形态是什么；
-  4. 该形态发生在当前K线日还是前几日；
-  5. 是否获得量能确认；
-  6. 与均线、RSI、MACD 是否存在信号分歧。
-- `dashboard.data_perspective.candlestick` 必须引用上方 K线识别结果。
-- 如果 `patterns_count = 0`，必须写“未发现明显K线形态”，不得强行判断突破、箱体或反转。
-- 判断“突破/箱体/反转/长上影/长下影/放量/缩量”时，必须有工具结果支持。
-- 判断量能确认时，优先引用 `volume_context.volume_ratio_vs_5d`、`volume_context.volume_ratio_vs_20d`、`volume_context.volume_status`。
-- 如果 `volume_context` 不存在或计算失败，必须写“量能确认数据缺失”，不得自行填 0 或编造放量/缩量。
+1. `pattern_context`：历史完整日K，来自 `analyze_pattern`，用于判断最近完整交易日形态、历史K线组合、历史量能确认。
+2. `intraday_kline_context`：今日盘中正在形成的K线，来自实时行情，只能作为盘中参考，未收盘确认。
 """
+
+        if has_pattern_context:
+            pattern_json = json.dumps(
+                pattern_context,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+
+            prompt += f"""
+#### 1. 历史完整日K结构：pattern_context
+
+以下内容来自程序化K线识别工具 `analyze_pattern`，代表【历史完整日K】，不是今日盘中实时K线。
+
+pattern_context JSON：
+
+{pattern_json}
+"""
+
         elif isinstance(pattern_context, dict) and pattern_context.get("error"):
             prompt += f"""
 ### K线结构与形态识别
 
-数据缺失，无法进行K线形态识别。
+历史完整日K数据缺失，无法进行历史K线形态识别。
 
 错误原因：{pattern_context.get("error")}
 """
 
+        if has_intraday_context:
+            intraday_json = json.dumps(
+                intraday_kline_context,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+
+            prompt += f"""
+#### 2. 今日盘中K线结构：intraday_kline_context
+
+以下内容来自实时行情构造，代表【今日盘中正在形成的K线】，未收盘确认。
+
+intraday_kline_context JSON：
+
+{intraday_json}
+"""
+
+        prompt += f"""
+#### K线分析强制要求
+
+- 当前市场分析模式：`{analysis_mode}`。
+- 必须区分 `pattern_context` 和 `intraday_kline_context`：
+  - `pattern_context`：历史完整日K，来自 `analyze_pattern`，用于判断最近完整交易日形态、历史K线组合、历史量能确认。
+  - `intraday_kline_context`：今日盘中正在形成的K线，来自实时行情，只能作为盘中参考，未收盘确认。
+- 如果 `market_status.analysis_mode = trading_intraday`：
+  - `pattern_context.current_candle` 不得写成今日盘中K线，除非其 `date` 等于自然日期。
+  - 今日盘中K线必须优先引用 `intraday_kline_context`。
+  - 盘中涨停、盘中跌停、盘中大阳线、盘中大阴线、盘中放量，必须来自 `intraday_kline_context` 或实时行情。
+- 如果 `market_status.analysis_mode = pre_market` 或 `non_trading_day`：
+  - 不得把 `pattern_context.current_candle` 写成今日盘中K线。
+  - 必须写成最近完整交易日K线。
+- `pattern_analysis` 必须同时说明：
+  1. 历史完整日K对应的真实交易日和形态；
+  2. 今日盘中K线当前形态；
+  3. 历史K线信号与盘中K线信号是否一致；
+  4. 历史量能和盘中量比是否一致；
+  5. 若出现“历史日K偏弱但盘中涨停”等冲突，必须写明“信号分歧”。
+- `patterns` 表示程序识别到的历史形态，必须结合 `day_offset` 判断发生时间：
+  - `day_offset = 0`：历史完整日K最后一根对应日形态；
+  - `day_offset = -1`：前一交易日形态；
+  - `day_offset = -2`：两日前或三根K线组合起点。
+- 严禁把 `day_offset = -1/-2` 的历史形态写成“今日盘中出现”。
+- 判断历史量能确认时，引用 `pattern_context.volume_context`。
+- 判断盘中量能确认时，引用 `intraday_kline_context.volume_context.volume_ratio` 和 `turnover_rate`。
+- 如果任一数据缺失，必须写“数据缺失，无法判断”，不得自行编造。
+"""
+
         
-        # 添加量价变化数据：优先使用 K线结构里的 volume_context，避免 volume_change_ratio 单位不一致
+        # 添加量价变化数据：区分历史完整日K量能和今日盘中量能
         pattern_context_for_volume = context.get("pattern_context") or {}
-        volume_ctx = (
+        intraday_context_for_volume = context.get("intraday_kline_context") or {}
+
+        historical_volume_ctx = (
             pattern_context_for_volume.get("volume_context")
             if isinstance(pattern_context_for_volume, dict)
             else {}
         )
 
-        if isinstance(volume_ctx, dict) and volume_ctx:
+        intraday_volume_ctx = (
+            intraday_context_for_volume.get("volume_context")
+            if isinstance(intraday_context_for_volume, dict)
+            else {}
+        )
+
+        if isinstance(historical_volume_ctx, dict) or isinstance(intraday_volume_ctx, dict):
+            prompt += "\n### 量价变化\n"
+
+            if isinstance(historical_volume_ctx, dict) and historical_volume_ctx:
+                prompt += f"""
+#### 历史完整日K量能
+- 最近完整日成交量 / 5日均量：{historical_volume_ctx.get("volume_ratio_vs_5d", "N/A")}倍
+- 最近完整日成交量 / 20日均量：{historical_volume_ctx.get("volume_ratio_vs_20d", "N/A")}倍
+- 历史量能状态：{historical_volume_ctx.get("volume_status", "N/A")}
+- 历史量能是否确认K线：{historical_volume_ctx.get("volume_confirmed", "N/A")}
+"""
+
+            if isinstance(intraday_volume_ctx, dict) and intraday_volume_ctx:
+                prompt += f"""
+#### 今日盘中量能
+- 盘中量比：{intraday_volume_ctx.get("volume_ratio", "N/A")}
+- 盘中换手率：{intraday_volume_ctx.get("turnover_rate", "N/A")}%
+- 盘中量能状态：{intraday_volume_ctx.get("volume_status", "N/A")}
+"""
+
             prompt += f"""
-### 量价变化
-- 当前成交量 / 5日均量：{volume_ctx.get("volume_ratio_vs_5d", "N/A")}倍
-- 当前成交量 / 20日均量：{volume_ctx.get("volume_ratio_vs_20d", "N/A")}倍
-- 量能状态：{volume_ctx.get("volume_status", "N/A")}
-- 量能是否确认K线：{volume_ctx.get("volume_confirmed", "N/A")}
+#### 价格变化
 - 价格较昨日变化：{context.get('price_change_ratio', 'N/A')}%
 """
         elif 'yesterday' in context:
@@ -1860,7 +1969,172 @@ class GeminiAnalyzer:
 """
         
         return prompt
+
     
+    
+    
+    
+    
+    
+    def _build_intraday_kline_context(self, context: dict) -> dict:
+        """
+        根据实时行情 / today 数据构造今日盘中正在形成的K线。
+        注意：
+        - 这是 forming candle，不是收盘确认K线
+        - 用于和历史完整日K pattern_context 区分
+        """
+        market_status = context.get("market_status") or {}
+        analysis_mode = market_status.get("analysis_mode", "unknown")
+
+        today = context.get("today") or {}
+        realtime = context.get("realtime") or {}
+
+        # 盘中行情一般用 close/current_price/price 表示最新价
+        open_p = (
+            today.get("open")
+            or realtime.get("open")
+            or realtime.get("open_price")
+        )
+        high_p = (
+            today.get("high")
+            or realtime.get("high")
+            or realtime.get("high_price")
+        )
+        low_p = (
+            today.get("low")
+            or realtime.get("low")
+            or realtime.get("low_price")
+        )
+        latest_p = (
+            realtime.get("price")
+            or realtime.get("current_price")
+            or today.get("close")
+            or today.get("price")
+        )
+
+        change_pct = (
+            realtime.get("change_pct")
+            or today.get("change_pct")
+            or realtime.get("pct_chg")
+        )
+
+        volume_ratio = realtime.get("volume_ratio") or today.get("volume_ratio")
+        turnover_rate = realtime.get("turnover_rate") or today.get("turnover_rate")
+
+        volume = today.get("volume") or realtime.get("volume")
+        amount = today.get("amount") or realtime.get("amount")
+
+        def to_float(x):
+            try:
+                if x is None or x == "":
+                    return None
+                return float(x)
+            except Exception:
+                return None
+
+        open_p = to_float(open_p)
+        high_p = to_float(high_p)
+        low_p = to_float(low_p)
+        latest_p = to_float(latest_p)
+        change_pct = to_float(change_pct)
+        volume_ratio = to_float(volume_ratio)
+        turnover_rate = to_float(turnover_rate)
+
+        if not all(v is not None for v in (open_p, high_p, low_p, latest_p)):
+            return {
+                "available": False,
+                "kline_scope": "intraday_forming",
+                "analysis_mode": analysis_mode,
+                "error": "实时行情 open/high/low/latest 数据不足，无法构造盘中K线",
+            }
+
+        full_range = max(high_p - low_p, 1e-9)
+        body_size = abs(latest_p - open_p)
+        upper_shadow = high_p - max(open_p, latest_p)
+        lower_shadow = min(open_p, latest_p) - low_p
+
+        body_ratio = body_size / full_range
+        upper_ratio = upper_shadow / full_range
+        lower_ratio = lower_shadow / full_range
+
+        if body_ratio <= 0.1:
+            candle_type = "盘中十字星"
+        elif latest_p > open_p and body_ratio >= 0.6:
+            candle_type = "盘中大阳线"
+        elif latest_p < open_p and body_ratio >= 0.6:
+            candle_type = "盘中大阴线"
+        elif latest_p > open_p:
+            candle_type = "盘中阳线"
+        elif latest_p < open_p:
+            candle_type = "盘中阴线"
+        else:
+            candle_type = "盘中平盘线"
+
+        if upper_ratio >= 0.45 and body_ratio <= 0.35:
+            shadow_feature = "盘中长上影"
+        elif lower_ratio >= 0.45 and body_ratio <= 0.35:
+            shadow_feature = "盘中长下影"
+        elif upper_ratio >= 0.35 and lower_ratio >= 0.35:
+            shadow_feature = "盘中上下影都较长"
+        else:
+            shadow_feature = "盘中影线普通"
+
+        # 简单涨停判断：创业板/科创板约20%，主板约10%
+        code = str(context.get("code") or "")
+        if code.startswith(("30", "68")):
+            limit_threshold = 19.8
+        else:
+            limit_threshold = 9.8
+
+        is_limit_up = bool(change_pct is not None and change_pct >= limit_threshold)
+        is_limit_down = bool(change_pct is not None and change_pct <= -limit_threshold)
+
+        if volume_ratio is None:
+            volume_status = "量比缺失"
+        elif volume_ratio >= 1.5:
+            volume_status = "盘中明显放量"
+        elif volume_ratio <= 0.7:
+            volume_status = "盘中明显缩量"
+        else:
+            volume_status = "盘中量能正常"
+
+        return {
+            "available": True,
+            "kline_scope": "intraday_forming",
+            "analysis_mode": analysis_mode,
+            "calendar_date": market_status.get("calendar_date"),
+            "run_datetime": market_status.get("run_datetime"),
+            "status_note": "盘中K线仍在形成，未收盘确认",
+            "ohlc": {
+                "open": round(open_p, 3),
+                "high": round(high_p, 3),
+                "low": round(low_p, 3),
+                "latest": round(latest_p, 3),
+            },
+            "change_pct": round(change_pct, 3) if change_pct is not None else None,
+            "candle_type": candle_type,
+            "shadow_feature": shadow_feature,
+            "body_ratio": round(body_ratio, 3),
+            "upper_shadow_ratio": round(upper_ratio, 3),
+            "lower_shadow_ratio": round(lower_ratio, 3),
+            "body_size": round(body_size, 3),
+            "upper_shadow": round(upper_shadow, 3),
+            "lower_shadow": round(lower_shadow, 3),
+            "volume_context": {
+                "volume": volume,
+                "amount": amount,
+                "volume_ratio": volume_ratio,
+                "turnover_rate": turnover_rate,
+                "volume_status": volume_status,
+            },
+            "limit_status": {
+                "is_limit_up": is_limit_up,
+                "is_limit_down": is_limit_down,
+                "limit_threshold_pct": limit_threshold,
+            },
+        }
+    
+
     def _format_volume(self, volume: Optional[float]) -> str:
         """格式化成交量显示"""
         if volume is None:
