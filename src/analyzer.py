@@ -668,7 +668,16 @@ class GeminiAnalyzer:
 2. **分持仓建议**：空仓者和持仓者给不同建议
 3. **精确狙击点**：必须给出具体价格，不说模糊的话
 4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
-5. **风险优先级**：舆情中的风险点要醒目标出"""
+5. **风险优先级**：舆情中的风险点要醒目标出
+
+## 休市 / 开盘前分析规则
+
+- 如果用户输入中 `market_status.analysis_mode = non_trading_day`，不得输出“立即买入/立即卖出”，只能输出“观察/持有/下一交易日开盘后确认”。
+- 如果用户输入中 `market_status.analysis_mode = pre_market`，不得基于静态昨收价直接追高，必须写“开盘后观察是否放量、是否站稳关键均线”。
+- 非交易时段的 `sniper_points` 可以给计划价位，但必须说明“需开盘后确认成交量和盘口”。
+- 非交易时段的 `time_sensitivity` 优先使用“开盘后确认/下一交易日观察/本周内”，避免使用“立即行动”。
+- 非交易时段不得把 `current_candle` 写成“今日盘中K线”，应写成“最近交易日K线”。
+"""
 
     SYSTEM_PROMPT = """你是一位{market_placeholder}投资分析师，负责生成专业的【决策仪表盘】分析报告。
 
@@ -835,7 +844,16 @@ class GeminiAnalyzer:
 2. **分持仓建议**：空仓者和持仓者给不同建议
 3. **精确狙击点**：必须给出具体价格，不说模糊的话
 4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
-5. **风险优先级**：舆情中的风险点要醒目标出"""
+5. **风险优先级**：舆情中的风险点要醒目标出
+
+## 休市 / 开盘前分析规则
+
+- 如果用户输入中 `market_status.analysis_mode = non_trading_day`，不得输出“立即买入/立即卖出”，只能输出“观察/持有/下一交易日开盘后确认”。
+- 如果用户输入中 `market_status.analysis_mode = pre_market`，不得基于静态昨收价直接追高，必须写“开盘后观察是否放量、是否站稳关键均线”。
+- 非交易时段的 `sniper_points` 可以给计划价位，但必须说明“需开盘后确认成交量和盘口”。
+- 非交易时段的 `time_sensitivity` 优先使用“开盘后确认/下一交易日观察/本周内”，避免使用“立即行动”。
+- 非交易时段不得把 `current_candle` 写成“今日盘中K线”，应写成“最近交易日K线”。
+"""
 
     TEXT_SYSTEM_PROMPT = """你是一位专业的股票分析助手。
 
@@ -1192,6 +1210,20 @@ class GeminiAnalyzer:
             else:
                 # 最后从映射表获取
                 name = STOCK_NAME_MAP.get(code, f'股票{code}')
+        
+        # 自动补充市场状态：交易日 / 开盘前 / 盘中 / 收盘后 / 休市
+        if "market_status" not in context:
+            try:
+                from src.services.trading_calendar import get_market_status
+
+                context["market_status"] = get_market_status()
+                logger.info("[市场状态] %s market_status=%s", code, context["market_status"])
+            except Exception as exc:
+                logger.warning("[市场状态] 获取失败: %s", exc, exc_info=True)
+                context["market_status"] = {
+                    "analysis_mode": "unknown",
+                    "mode_note": f"市场状态判断失败: {exc}",
+                }
 
 
         # 自动补充K线形态识别上下文
@@ -1385,6 +1417,54 @@ class GeminiAnalyzer:
         today = context.get('today', {})
         unknown_text = get_unknown_text(report_language)
         no_data_text = get_no_data_text(report_language)
+
+        # ========== 市场状态：交易日 / 开盘前 / 盘中 / 收盘后 / 休市 ==========
+        market_status = context.get("market_status") or {}
+        analysis_mode = market_status.get("analysis_mode", "unknown")
+
+        if analysis_mode in ("non_trading_day", "pre_market"):
+            quote_title = "最近交易日行情（休市/开盘前参考）"
+            candle_label = "最近可用交易日K线"
+            action_time_rule = "当前非盘中交易状态，操作建议必须以“开盘后确认”为前提。"
+        elif analysis_mode == "lunch_break":
+            quote_title = "盘中行情（午间休市参考）"
+            candle_label = "盘中临时K线"
+            action_time_rule = "当前处于午间休市，下午仍需确认量能与价格是否延续。"
+        elif analysis_mode == "after_market":
+            quote_title = "今日收盘行情"
+            candle_label = "今日收盘K线"
+            action_time_rule = "当前已收盘，操作建议用于下一交易日计划。"
+        elif analysis_mode == "trading_intraday":
+            quote_title = "今日盘中行情"
+            candle_label = "今日盘中K线"
+            action_time_rule = "当前处于交易时段，可作为盘中参考，但仍需控制追高风险。"
+        else:
+            quote_title = "最近可用行情"
+            candle_label = "最近可用K线"
+            action_time_rule = "市场状态未知，操作建议需保守处理。"
+
+        market_status_block = "\n---\n"
+        if market_status:
+            market_status_block = f"""
+---
+
+## 🗓️ 市场状态
+
+| 项目 | 状态 |
+|------|------|
+| 运行时间 | {market_status.get("run_datetime", "N/A")} |
+| 自然日期 | {market_status.get("calendar_date", "N/A")} |
+| 分析模式 | {market_status.get("analysis_mode", "N/A")} |
+| 是否交易日 | {market_status.get("is_trade_day", "N/A")} |
+| 是否交易时段 | {market_status.get("is_market_hours", "N/A")} |
+| 最近交易日 | {market_status.get("last_trade_day", "N/A")} |
+| 下一交易日 | {market_status.get("next_trade_day", "N/A")} |
+
+> {market_status.get("mode_note", "")}
+> {action_time_rule}
+
+---
+"""
         
         # ========== 构建决策仪表盘格式的输入 ==========
         prompt = f"""# 决策仪表盘分析请求
@@ -1395,12 +1475,12 @@ class GeminiAnalyzer:
 | 股票代码 | **{code}** |
 | 股票名称 | **{stock_name}** |
 | 分析日期 | {context.get('date', unknown_text)} |
+{market_status_block}
 
----
 
 ## 📈 技术面数据
 
-### 今日行情
+### {quote_title}
 | 指标 | 数值 |
 |------|------|
 | 收盘价 | {today.get('close', 'N/A')} 元 |
@@ -1563,19 +1643,23 @@ class GeminiAnalyzer:
 ```
 
 #### K线分析强制要求
-- `current_candle` 表示【今日K线】，必须优先用于判断今日K线类型、实体、上下影线。
-- `recent_candles` 表示最近5根K线，只能用于判断短期连续性和多空分歧。
+- 当前市场分析模式：`{analysis_mode}`。
+- `current_candle` 表示【{candle_label}】，必须优先用于判断K线类型、实体、上下影线。
+- `current_candle.date` 才是该K线对应的真实交易日，不得用自然运行日期替代。
+- 如果 `market_status.analysis_mode` 为 `non_trading_day` 或 `pre_market`，则 `current_candle` 必须解释为【最近可用交易日K线】，不得写成“今日盘中已经形成的K线”。
+- `recent_candles` 表示最近5根有效交易日K线，只能用于判断短期连续性和多空分歧。
 - `patterns` 表示程序识别到的最近形态，必须结合 `day_offset` 判断发生时间：
-  - `day_offset = 0`：今日形态
+  - `day_offset = 0`：最近可用交易日 / 当前K线对应日的形态
   - `day_offset = -1`：前一交易日形态
   - `day_offset = -2`：两日前或三根K线组合起点
 - 严禁把 `day_offset = -1/-2` 的形态写成“今日出现”。
 - `pattern_analysis` 必须同时说明：
-  1. 今日K线是什么；
-  2. 最近形态是什么；
-  3. 该形态发生在今日还是前几日；
-  4. 是否获得量能确认；
-  5. 与均线、RSI、MACD 是否存在信号分歧。
+  1. 当前K线对应的真实交易日；
+  2. 当前K线是什么；
+  3. 最近形态是什么；
+  4. 该形态发生在当前K线日还是前几日；
+  5. 是否获得量能确认；
+  6. 与均线、RSI、MACD 是否存在信号分歧。
 - `dashboard.data_perspective.candlestick` 必须引用上方 K线识别结果。
 - 如果 `patterns_count = 0`，必须写“未发现明显K线形态”，不得强行判断突破、箱体或反转。
 - 判断“突破/箱体/反转/长上影/长下影/放量/缩量”时，必须有工具结果支持。
@@ -1592,12 +1676,28 @@ class GeminiAnalyzer:
 """
 
         
-        # 添加昨日对比数据
-        if 'yesterday' in context:
+        # 添加量价变化数据：优先使用 K线结构里的 volume_context，避免 volume_change_ratio 单位不一致
+        pattern_context_for_volume = context.get("pattern_context") or {}
+        volume_ctx = (
+            pattern_context_for_volume.get("volume_context")
+            if isinstance(pattern_context_for_volume, dict)
+            else {}
+        )
+
+        if isinstance(volume_ctx, dict) and volume_ctx:
+            prompt += f"""
+### 量价变化
+- 当前成交量 / 5日均量：{volume_ctx.get("volume_ratio_vs_5d", "N/A")}倍
+- 当前成交量 / 20日均量：{volume_ctx.get("volume_ratio_vs_20d", "N/A")}倍
+- 量能状态：{volume_ctx.get("volume_status", "N/A")}
+- 量能是否确认K线：{volume_ctx.get("volume_confirmed", "N/A")}
+- 价格较昨日变化：{context.get('price_change_ratio', 'N/A')}%
+"""
+        elif 'yesterday' in context:
             volume_change = context.get('volume_change_ratio', 'N/A')
             prompt += f"""
 ### 量价变化
-- 成交量较昨日变化：{volume_change}倍
+- 成交量较昨日变化：{volume_change}倍（注意：如与K线 volume_context 冲突，以 volume_context 为准）
 - 价格较昨日变化：{context.get('price_change_ratio', 'N/A')}%
 """
         
@@ -1727,6 +1827,14 @@ class GeminiAnalyzer:
 - **具体狙击点位**：买入价、止损价、目标价（精确到分）
 - **检查清单**：每项用 ✅/⚠️/❌ 标记
 - **消息面时间合规**：`latest_news`、`risk_alerts`、`positive_catalysts` 不得包含超出近{news_window_days}日或时间未知的信息
+
+### ⏱️ 交易时段约束
+- 当前分析模式：`{analysis_mode}`
+- 当前市场说明：{market_status.get("mode_note", "N/A")}
+- {action_time_rule}
+- 如果当前不是 `trading_intraday`，不得使用“立即买入/立即卖出”作为最终行动。
+- 如果当前是 `pre_market` 或 `non_trading_day`，必须将买卖建议表述为“开盘后确认”“下一交易日观察”“满足触发条件后执行”。
+- 非交易时段的 `sniper_points` 可以给计划价位，但必须说明“需开盘后确认成交量和盘口”。
 
 请输出完整的 JSON 格式决策仪表盘。"""
 
