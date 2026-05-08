@@ -38,6 +38,11 @@ from src.config import (
     resolve_news_window_days,
 )
 
+import os
+import json
+
+
+
 logger = logging.getLogger(__name__)
 
 # Transient network errors (retryable)
@@ -1614,6 +1619,160 @@ class SearXNGSearchProvider(BaseSearchProvider):
             search_time=elapsed,
         )
 
+class OpenAIWebSearchProvider(BaseSearchProvider):
+    """
+    OpenAI 官方 Web Search。
+
+    最小改动原则：
+    - 只复用现有 OPENAI_API_KEY
+    - 不新增配置项
+    - 不改 config.py
+    - 不改 .env.example
+    """
+
+    def __init__(self, api_keys: List[str]):
+        super().__init__(api_keys, "OpenAI-WebSearch")
+
+    def _do_search(
+        self,
+        query: str,
+        api_key: str,
+        max_results: int,
+        days: int = 7,
+    ) -> SearchResponse:
+        try:
+            from openai import OpenAI
+        except ImportError:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="openai 未安装，请运行: pip install openai",
+            )
+
+        prompt = f"""
+你是一名A股事件新闻检索助手。
+
+请根据下面的搜索意图，检索最近 {days} 天内与该股票相关的【重要事件新闻】：
+
+搜索意图：
+{query}
+
+重点关注但不要被关键词限制：
+1. 重大合同 / 大额订单 / 中标 / 签约
+2. 子公司重大进展
+3. 新产品 / 新技术 / 量产 / 交付 / 客户突破
+4. 并购重组 / 控制权变更 / 停复牌
+5. 问询函 / 处罚 / 诉讼 / 监管风险
+6. 业绩预告 / 财报重大变化
+7. 其他可能影响股价的重大利好或重大利空
+
+严格要求：
+- 只保留最近 {days} 天内的信息
+- date 字段必须填写【新闻发布日 / 公告披露日】，不要填写合同签署期间、订单发生期间、财报报告期
+- 如果只能找到事件发生区间，但无法确认新闻发布日 / 公告披露日，则不要返回该条
+- summary 中可以说明合同签署期间或事件发生期间
+- 必须与目标股票直接相关
+- 不要编造
+- 不要输出解释文字
+- 必须严格输出 JSON
+
+输出格式：
+{{
+  "items": [
+    {{
+      "date": "YYYY-MM-DD",
+      "title": "新闻标题",
+      "source": "来源",
+      "summary": "一句话摘要",
+      "category": "latest_news"
+    }}
+  ]
+}}
+
+category 只能取：
+- latest_news
+- event_catalyst
+- risk_check
+- earnings
+"""
+
+        try:
+            client = OpenAI(api_key=api_key)
+
+            response = client.responses.create(
+                model="gpt-4.1",
+                tools=[{"type": "web_search"}],
+                input=prompt,
+            )
+
+            text = (getattr(response, "output_text", "") or "").strip()
+            if not text:
+                return SearchResponse(
+                    query=query,
+                    results=[],
+                    provider=self.name,
+                    success=True,
+                )
+
+            try:
+                data = json.loads(text)
+            except Exception:
+                match = re.search(r"\{.*\}", text, re.S)
+                if not match:
+                    return SearchResponse(
+                        query=query,
+                        results=[],
+                        provider=self.name,
+                        success=False,
+                        error_message=f"OpenAI 返回内容不是 JSON: {text[:200]}",
+                    )
+                data = json.loads(match.group(0))
+
+            items = data.get("items", [])
+            if not isinstance(items, list):
+                items = []
+
+            results: List[SearchResult] = []
+            for item in items[:max_results]:
+                if not isinstance(item, dict):
+                    continue
+
+                title = str(item.get("title") or "").strip()
+                summary = str(item.get("summary") or "").strip()
+                source = str(item.get("source") or "OpenAI Web Search").strip()
+                published_date = str(item.get("date") or "").strip() or None
+                category = str(item.get("category") or "latest_news").strip()
+
+                if not title and not summary:
+                    continue
+
+                results.append(
+                    SearchResult(
+                        title=f"[{category}] {title}" if category else title,
+                        snippet=summary,
+                        url=str(item.get("url") or item.get("link") or "").strip(),
+                        source=source,
+                        published_date=published_date,
+                    )
+                )
+
+            return SearchResponse(
+                query=query,
+                results=results,
+                provider=self.name,
+                success=True,
+            )
+
+        except Exception as e:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=str(e),
+            )
 
 class SearchService:
     """
@@ -1693,6 +1852,11 @@ class SearchService:
         )
 
         # 初始化搜索引擎（按优先级排序）
+        # 0. OpenAI 官方 Web Search：复用现有 OPENAI_API_KEY，不新增配置
+        openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if openai_api_key:
+            self._providers.append(OpenAIWebSearchProvider([openai_api_key]))
+            logger.info("已配置 OpenAI Web Search")
         # 1. Bocha 优先（中文搜索优化，AI摘要）
         if bocha_keys:
             self._providers.append(BochaSearchProvider(bocha_keys))
@@ -2133,7 +2297,7 @@ class SearchService:
             return response
 
         today = datetime.now().date()
-        earliest = today - timedelta(days=max(0, int(search_days) - 1))
+        earliest = today - timedelta(days=max(1, int(search_days)))
         latest = today + timedelta(days=self.FUTURE_TOLERANCE_DAYS)
 
         filtered: List[SearchResult] = []
@@ -2433,6 +2597,11 @@ class SearchService:
         is_foreign = self._is_foreign_stock(stock_code)
         is_index_etf = self.is_index_or_etf(stock_code, stock_name)
 
+        # ✅ 必须先定义 search_days，因为下面 query 会用到它
+        search_days = self._effective_news_window_days()
+        target_per_dimension = 3
+        provider_max_results = max(10, self._provider_request_size(target_per_dimension))
+
         if is_foreign:
             search_dimensions = [
                 {
@@ -2442,33 +2611,36 @@ class SearchService:
                     'tavily_topic': 'news',
                     'strict_freshness': True,
                 },
-                {
-                    'name': 'market_analysis',
-                    'query': f"{stock_name} analyst rating target price report",
-                    'desc': '机构分析',
-                    'tavily_topic': None,
-                    'strict_freshness': False,
-                },
-                {
-                    'name': 'risk_check',
-                    'query': (
-                        f"{stock_name} {stock_code} index performance outlook tracking error"
-                        if is_index_etf else f"{stock_name} risk insider selling lawsuit litigation"
-                    ),
-                    'desc': '风险排查',
-                    'tavily_topic': None if is_index_etf else 'news',
-                    'strict_freshness': not is_index_etf,
-                },
-                {
-                    'name': 'earnings',
-                    'query': (
-                        f"{stock_name} {stock_code} index performance composition outlook"
-                        if is_index_etf else f"{stock_name} earnings revenue profit growth forecast"
-                    ),
-                    'desc': '业绩预期',
-                    'tavily_topic': None,
-                    'strict_freshness': False,
-                },
+                # 这个消息经常落后,所以不加入分析
+                #{
+                #    'name': 'market_analysis',
+                #    'query': f"{stock_name} analyst rating target price report",
+                #    'desc': '机构分析',
+                #    'tavily_topic': None,
+                #    'strict_freshness': False,
+                #},
+                # tavily 垃圾信息太多
+                #{
+                #    'name': 'risk_check',
+                #    'query': (
+                #        f"{stock_name} {stock_code} index performance outlook tracking error"
+                #        if is_index_etf else f"{stock_name} risk insider selling lawsuit litigation"
+                #    ),
+                #    'desc': '风险排查',
+                #    'tavily_topic': None if is_index_etf else 'news',
+                #    'strict_freshness': not is_index_etf,
+                #},
+                # tavily 垃圾信息太多
+                #{
+                #    'name': 'earnings',
+                #    'query': (
+                #        f"{stock_name} {stock_code} index performance composition outlook"
+                #        if is_index_etf else f"{stock_name} earnings revenue profit growth forecast"
+                #    ),
+                #    'desc': '业绩预期',
+                #    'tavily_topic': None,
+                #    'strict_freshness': False,
+                #},
                 {
                     'name': 'industry',
                     'query': (
@@ -2486,42 +2658,46 @@ class SearchService:
                     'name': 'latest_news',
                     'query': (
                         f"{stock_name} 指数 ETF 最新公告 净值 跟踪"
-                        if is_index_etf else f"{stock_name} A股 中国 公司公告 最新公告 深交所 巨潮资讯 一季报 财报"
+                        if is_index_etf
+                        else f"{stock_name} {stock_code} 最近{search_days}天 重大合同 订单 中标 签约 子公司 最新公告 业绩预告 业绩快报 财报 风险"
                     ),
                     'desc': '最新消息',
                     'tavily_topic': None if is_index_etf else 'news',
                     'strict_freshness': not is_index_etf,
                 },
-                {
-                    'name': 'market_analysis',
-                    'query': (
-                        f"{stock_name} 指数 ETF 资金流向 跟踪误差 规模 份额"
-                        if is_index_etf else f"{stock_name} 研报 目标价 评级 深度分析"
-                    ),
-                    'desc': '机构分析',
-                    'tavily_topic': None,
-                    'strict_freshness': False,
-                },
-                {
-                    'name': 'risk_check',
-                    'query': (
-                        f"{stock_name} 指数走势 跟踪误差 净值 表现"
-                        if is_index_etf else f"{stock_name} A股 中国 减持 问询函 监管函 处罚 诉讼 风险 深交所"
-                    ),
-                    'desc': '风险排查',
-                    'tavily_topic': None if is_index_etf else 'news',
-                    'strict_freshness': not is_index_etf,
-                },
-                {
-                    'name': 'earnings',
-                    'query': (
-                        f"{stock_name} 指数 ETF 跟踪标的 权重股 调仓"
-                        if is_index_etf else f"{stock_name} 业绩预告 财报 营收 净利润 同比增长"
-                    ),
-                    'desc': '业绩预期',
-                    'tavily_topic': None,
-                    'strict_freshness': False,
-                },
+                # 这个消息经常来自于tavily, 经常落后,因此注掉
+                #{
+                #    'name': 'market_analysis',
+                #    'query': (
+                #        f"{stock_name} 指数 ETF 资金流向 跟踪误差 规模 份额"
+                #        if is_index_etf else f"{stock_name} 研报 目标价 评级 深度分析"
+                #    ),
+                #    'desc': '机构分析',
+                #    'tavily_topic': None,
+                #    'strict_freshness': False,
+                #},
+                # tavily 垃圾信息太多
+                #{
+                #    'name': 'risk_check',
+                #    'query': (
+                #        f"{stock_name} 指数走势 跟踪误差 净值 表现"
+                #        if is_index_etf else f"{stock_name} A股 中国 减持 问询函 监管函 处罚 诉讼 风险 深交所"
+                #    ),
+                #    'desc': '风险排查',
+                #    'tavily_topic': None if is_index_etf else 'news',
+                #    'strict_freshness': not is_index_etf,
+                #},
+                # tavily 垃圾信息太多
+                #{
+                #    'name': 'earnings',
+                #    'query': (
+                #        f"{stock_name} 指数 ETF 跟踪标的 权重股 调仓"
+                #        if is_index_etf else f"{stock_name} 业绩预告 财报 营收 净利润 同比增长"
+                #    ),
+                #    'desc': '业绩预期',
+                #    'tavily_topic': None,
+                #    'strict_freshness': False,
+                #},
                 {
                     'name': 'industry',
                     'query': (
@@ -2534,9 +2710,6 @@ class SearchService:
                 },
             ]
         
-        search_days = self._effective_news_window_days()
-        target_per_dimension = 3
-        provider_max_results = max(10, self._provider_request_size(target_per_dimension))
 
         logger.info(
             (

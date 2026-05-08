@@ -1330,7 +1330,19 @@ class GeminiAnalyzer:
                 # 解析响应
                 result = self._parse_response(response_text, code, name)
                 result.raw_response = response_text
-                result.search_performed = bool(news_context)
+
+                # search_performed 不能相信 LLM 自己输出，必须由程序根据 news_context 强制覆盖
+                # 含义：本次是否向分析器注入过搜索/情报上下文，而不是 LLM 是否认为自己搜索过
+                search_performed = bool(news_context and str(news_context).strip())
+                if result.search_performed != search_performed:
+                    logger.info(
+                        "[search_performed] 覆盖 LLM 输出: llm_value=%s, final_value=%s, news_context_len=%s",
+                        result.search_performed,
+                        search_performed,
+                        len(str(news_context or "")),
+                    )
+                result.search_performed = search_performed
+                
                 result.market_snapshot = self._build_market_snapshot(context)
                 result.model_used = model_used
                 result.report_language = report_language
