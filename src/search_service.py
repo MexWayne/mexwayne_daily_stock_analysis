@@ -1816,7 +1816,7 @@ class SearchService:
         minimax_keys: Optional[List[str]] = None,
         searxng_base_urls: Optional[List[str]] = None,
         searxng_public_instances_enabled: bool = True,
-        news_max_age_days: int = 3,
+        news_max_age_days: int = 7,
         news_strategy_profile: str = "short",
     ):
         """
@@ -2630,17 +2630,16 @@ class SearchService:
                 #    'tavily_topic': None if is_index_etf else 'news',
                 #    'strict_freshness': not is_index_etf,
                 #},
-                # tavily 垃圾信息太多
-                #{
-                #    'name': 'earnings',
-                #    'query': (
-                #        f"{stock_name} {stock_code} index performance composition outlook"
-                #        if is_index_etf else f"{stock_name} earnings revenue profit growth forecast"
-                #    ),
-                #    'desc': '业绩预期',
-                #    'tavily_topic': None,
-                #    'strict_freshness': False,
-                #},
+                {
+                    'name': 'earnings',
+                    'query': (
+                        f"{stock_name} {stock_code} index performance composition outlook"
+                        if is_index_etf else f"{stock_name} earnings revenue profit growth forecast"
+                    ),
+                    'desc': '业绩预期',
+                    'tavily_topic': None,
+                    'strict_freshness': False,
+                },
                 {
                     'name': 'industry',
                     'query': (
@@ -2687,17 +2686,19 @@ class SearchService:
                 #    'tavily_topic': None if is_index_etf else 'news',
                 #    'strict_freshness': not is_index_etf,
                 #},
-                # tavily 垃圾信息太多
-                #{
-                #    'name': 'earnings',
-                #    'query': (
-                #        f"{stock_name} 指数 ETF 跟踪标的 权重股 调仓"
-                #        if is_index_etf else f"{stock_name} 业绩预告 财报 营收 净利润 同比增长"
-                #    ),
-                #    'desc': '业绩预期',
-                #    'tavily_topic': None,
-                #    'strict_freshness': False,
-                #},
+                {
+                    'name': 'earnings',
+                    'query': (
+                        f"{stock_name} {stock_code} 最近30天 "
+                        f"一季报 半年报 三季报 年报 业绩预告 业绩快报 "
+                        f"营收 净利润 归母净利润 扣非净利润 同比 环比 毛利率 "
+                        f"业绩大增 业绩下滑 财报发布 公告 披露"
+                    ),
+                    'desc': '业绩预期',
+                    'tavily_topic': None,
+                    'strict_freshness': True,
+                    'search_days_override': 30,
+                },
                 {
                     'name': 'industry',
                     'query': (
