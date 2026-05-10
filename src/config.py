@@ -510,6 +510,8 @@ class Config:
     news_max_age_days: int = 7   # 新闻最大时效（天）
     news_strategy_profile: str = "short"  # 新闻窗口策略档位：ultra_short/short/medium/long
     bias_threshold: float = 5.0  # 乖离率阈值（%），超过此值提示不追高
+    # === 新闻搜索开关 ===
+    enable_news_search: bool = True  # 默认开启新闻搜索
 
     # === Agent 模式配置 ===
     agent_litellm_model: str = ""  # Optional Agent-only primary model; empty inherits LITELLM_MODEL

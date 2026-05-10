@@ -271,6 +271,12 @@ def parse_arguments() -> argparse.Namespace:
         help='强制回测（即使已有回测结果也重新计算）'
     )
 
+    parser.add_argument(
+        "--no-news-search",
+        action="store_true",
+        help="本次运行关闭新闻搜索/情报检索，默认开启"
+    )
+
     return parser.parse_args()
 
 
@@ -624,6 +630,16 @@ def main() -> int:
 
     # 加载配置（在设置日志前加载，以获取日志目录）
     config = get_config()
+
+
+    if args.no_news_search:
+        config.enable_news_search = False
+        logger.info("本次运行已关闭新闻搜索: --no-news-search")
+    else:
+        config.enable_news_search = True
+        logger.info("本次运行启用新闻搜索")
+
+
 
     # 配置日志（输出到控制台和文件）
     setup_logging(log_prefix="stock_analysis", debug=args.debug, log_dir=config.log_dir)

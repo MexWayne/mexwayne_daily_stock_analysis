@@ -90,17 +90,24 @@ class StockAnalysisPipeline:
         self.notifier = NotificationService(source_message=source_message)
         
         # 初始化搜索服务
-        self.search_service = SearchService(
-            bocha_keys=self.config.bocha_api_keys,
-            tavily_keys=self.config.tavily_api_keys,
-            brave_keys=self.config.brave_api_keys,
-            serpapi_keys=self.config.serpapi_keys,
-            minimax_keys=self.config.minimax_api_keys,
-            searxng_base_urls=self.config.searxng_base_urls,
-            searxng_public_instances_enabled=self.config.searxng_public_instances_enabled,
-            news_max_age_days=self.config.news_max_age_days,
-            news_strategy_profile=getattr(self.config, "news_strategy_profile", "short"),
-        )
+        # 默认开启；当 main.py 传入 --no-news-search 时，config.enable_news_search 会被置为 False
+        self.enable_news_search = getattr(self.config, "enable_news_search", True)
+
+        if self.enable_news_search:
+            self.search_service = SearchService(
+                bocha_keys=self.config.bocha_api_keys,
+                tavily_keys=self.config.tavily_api_keys,
+                brave_keys=self.config.brave_api_keys,
+                serpapi_keys=self.config.serpapi_keys,
+                minimax_keys=self.config.minimax_api_keys,
+                searxng_base_urls=self.config.searxng_base_urls,
+                searxng_public_instances_enabled=self.config.searxng_public_instances_enabled,
+                news_max_age_days=self.config.news_max_age_days,
+                news_strategy_profile=getattr(self.config, "news_strategy_profile", "short"),
+            )
+        else:
+            self.search_service = None
+            logger.info("新闻搜索已关闭：本次运行不会初始化 SearchService")
         
         logger.info(f"调度器初始化完成，最大并发数: {self.max_workers}")
         logger.info("已启用技术分析引擎（均线/趋势/量价指标）")
@@ -113,7 +120,10 @@ class StockAnalysisPipeline:
             logger.info("筹码分布分析已启用")
         else:
             logger.info("筹码分布分析已禁用")
-        if self.search_service.is_available:
+
+        if not self.enable_news_search:
+            logger.info("搜索服务已关闭（--no-news-search）")
+        elif self.search_service and self.search_service.is_available:
             logger.info("搜索服务已启用")
         else:
             logger.warning("搜索服务未启用（未配置搜索能力）")
@@ -315,7 +325,8 @@ class StockAnalysisPipeline:
 
             # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
             news_context = None
-            if self.search_service.is_available:
+
+            if self.search_service and self.search_service.is_available:
                 logger.info(f"{stock_name}({code}) 开始多维度情报搜索...")
 
                 # 使用多维度搜索（最多5次搜索）
@@ -349,8 +360,11 @@ class StockAnalysisPipeline:
                                 )
                     except Exception as e:
                         logger.warning(f"{stock_name}({code}) 保存新闻情报失败: {e}")
-            else:
-                logger.info(f"{stock_name}({code}) 搜索服务不可用，跳过情报搜索")
+                else:
+                    if not self.enable_news_search:
+                        logger.info(f"{stock_name}({code}) 新闻搜索已关闭，跳过情报搜索")
+                    else:
+                        logger.info(f"{stock_name}({code}) 搜索服务不可用，跳过情报搜索")
 
             # Step 4.5: Social sentiment intelligence (US stocks only)
             if self.social_sentiment_service.is_available and is_us_stock_code(code):
@@ -468,7 +482,12 @@ class StockAnalysisPipeline:
             enhanced['stock_name'] = realtime_quote.name
 
         # 将运行时搜索窗口透传给 analyzer，避免与全局配置重新读取产生窗口不一致
-        enhanced['news_window_days'] = getattr(self.search_service, "news_window_days", 3)
+        # 当 --no-news-search 时 self.search_service=None，使用配置值兜底
+        enhanced['news_window_days'] = (
+            getattr(self.search_service, "news_window_days", getattr(self.config, "news_max_age_days", 3))
+            if self.search_service
+            else getattr(self.config, "news_max_age_days", 3)
+        )
         
         # 添加实时行情（兼容不同数据源的字段差异）
         if realtime_quote:
@@ -736,7 +755,7 @@ class StockAnalysisPipeline:
 
             # 保存新闻情报到数据库（Agent 工具结果仅用于 LLM 上下文，未持久化，Fixes #396）
             # 使用 search_stock_news（与 Agent 工具调用逻辑一致），仅 1 次 API 调用，无额外延迟
-            if self.search_service.is_available:
+            if self.search_service and self.search_service.is_available:
                 try:
                     news_response = self.search_service.search_stock_news(
                         stock_code=code,
