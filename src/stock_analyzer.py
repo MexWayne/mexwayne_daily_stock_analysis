@@ -18,7 +18,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from enum import Enum
 
 import pandas as pd
@@ -112,6 +112,26 @@ class TrendAnalysisResult:
     resistance_levels: List[float] = field(default_factory=list)
     support_levels: List[float] = field(default_factory=list)
 
+    # K线结构分析
+    latest_candle_type: str = ""          # 最新K线类型：强实体阳线/长上影/长下影等
+    candle_body_pct: float = 0.0          # 实体占全天振幅比例
+    upper_shadow_pct: float = 0.0         # 上影线占全天振幅比例
+    lower_shadow_pct: float = 0.0         # 下影线占全天振幅比例
+    close_position_pct: float = 0.0       # 收盘价在日内区间的位置，越高越强
+    price_change_pct: float = 0.0         # 当日涨跌幅
+
+    break_20d_high: bool = False          # 是否突破近20日高点
+    break_20d_low: bool = False           # 是否跌破近20日低点
+    near_ma5: bool = False                # 是否贴近MA5
+    near_ma10: bool = False               # 是否贴近MA10
+    near_ma20: bool = False               # 是否贴近MA20
+
+    kline_structure_score: int = 50       # K线结构分，0-100
+    kline_structure_label: str = "中性结构"
+    kline_signals: List[str] = field(default_factory=list)
+    kline_risks: List[str] = field(default_factory=list)
+    kline_summary: str = ""
+
     # MACD 指标
     macd_dif: float = 0.0          # DIF 快线
     macd_dea: float = 0.0          # DEA 慢线
@@ -151,6 +171,27 @@ class TrendAnalysisResult:
             'volume_trend': self.volume_trend,
             'support_ma5': self.support_ma5,
             'support_ma10': self.support_ma10,
+            'support_levels': self.support_levels,
+            'resistance_levels': self.resistance_levels,
+
+            # K线结构
+            'latest_candle_type': self.latest_candle_type,
+            'candle_body_pct': self.candle_body_pct,
+            'upper_shadow_pct': self.upper_shadow_pct,
+            'lower_shadow_pct': self.lower_shadow_pct,
+            'close_position_pct': self.close_position_pct,
+            'price_change_pct': self.price_change_pct,
+            'break_20d_high': self.break_20d_high,
+            'break_20d_low': self.break_20d_low,
+            'near_ma5': self.near_ma5,
+            'near_ma10': self.near_ma10,
+            'near_ma20': self.near_ma20,
+            'kline_structure_score': self.kline_structure_score,
+            'kline_structure_label': self.kline_structure_label,
+            'kline_signals': self.kline_signals,
+            'kline_risks': self.kline_risks,
+            'kline_summary': self.kline_summary,
+
             'buy_signal': self.buy_signal.value,
             'signal_score': self.signal_score,
             'signal_reasons': self.signal_reasons,
@@ -202,7 +243,127 @@ class StockTrendAnalyzer:
         """初始化分析器"""
         pass
     
-    def analyze(self, df: pd.DataFrame, code: str) -> TrendAnalysisResult:
+    # fix bug in log: volume=363742 but latest_volume=36374206.0
+    def _normalize_volume_for_ratio(self, latest_volume: float, avg_volume: float) -> float:
+        """
+        修正最新成交量与历史成交量单位不一致的问题。
+
+        常见情况：
+        - 实时行情 volume 是“手”
+        - 历史日线 volume 是“股”
+        二者可能相差约 100 倍。
+
+        例：
+        latest_volume = 363742
+        avg_volume = 32869273
+        直接相除 = 0.01，明显错误
+        修正后 latest_volume * 100 = 36374200
+        量比约 = 1.11
+        """
+        try:
+            latest_volume = float(latest_volume)
+            avg_volume = float(avg_volume)
+        except (TypeError, ValueError):
+            return latest_volume
+
+        if latest_volume <= 0 or avg_volume <= 0:
+            return latest_volume
+
+        raw_ratio = latest_volume / avg_volume
+
+        # 最新量明显比历史均量小两个数量级，大概率最新量单位是“手”，历史量单位是“股”
+        if 0 < raw_ratio < 0.05:
+            fixed_volume = latest_volume * 100
+            fixed_ratio = fixed_volume / avg_volume
+
+            # 修正后回到合理区间，才采用修正值
+            if 0.05 <= fixed_ratio <= 20:
+                logger.info(
+                    "成交量单位自动修正: latest_volume=%s -> %s, avg_volume=%s, ratio %.4f -> %.4f",
+                    latest_volume,
+                    fixed_volume,
+                    avg_volume,
+                    raw_ratio,
+                    fixed_ratio,
+                )
+                return fixed_volume
+
+        # 反向兜底：最新量明显比历史均量大两个数量级
+        if raw_ratio > 50:
+            fixed_volume = latest_volume / 100
+            fixed_ratio = fixed_volume / avg_volume
+
+            if 0.05 <= fixed_ratio <= 20:
+                logger.info(
+                    "成交量单位自动修正: latest_volume=%s -> %s, avg_volume=%s, ratio %.4f -> %.4f",
+                    latest_volume,
+                    fixed_volume,
+                    avg_volume,
+                    raw_ratio,
+                    fixed_ratio,
+                )
+                return fixed_volume
+
+        return latest_volume
+    
+
+    def _resolve_price_change_pct(
+        self,
+        latest,
+        prev,
+        realtime_change_pct: Optional[float] = None,
+    ) -> float:
+        """
+        统一解析涨跌幅。
+
+        优先级：
+        1. 实时行情 change_pct
+        2. DataFrame 内已有 change_pct / pct_chg 字段
+        3. 用 latest.close 和 prev.close 兜底计算
+
+        注意：
+        - 实时行情在开盘前/盘中通常比 df 中的伪最新行更可靠
+        - 当前修复目标：避免 K线摘要里出现“涨跌幅=0.00%”
+        """
+        # 1. 优先使用实时行情 change_pct
+        try:
+            if realtime_change_pct is not None:
+                v = float(realtime_change_pct)
+                if not np.isnan(v) and not np.isinf(v):
+                    return v
+        except (TypeError, ValueError):
+            pass
+
+        # 2. 其次使用 df 中已有涨跌幅字段
+        for col in ["change_pct", "pct_chg", "pct_change", "涨跌幅"]:
+            try:
+                if hasattr(latest, "index") and col in latest.index:
+                    v = float(latest[col])
+                    if not np.isnan(v) and not np.isinf(v):
+                        return v
+            except (TypeError, ValueError):
+                continue
+
+        # 3. 最后兜底用 close 计算
+        try:
+            prev_close = float(prev["close"])
+            latest_close = float(latest["close"])
+            if prev_close > 0:
+                return (latest_close - prev_close) / prev_close * 100
+        except (TypeError, ValueError, KeyError):
+            pass
+
+        return 0.0
+
+
+
+    
+    def analyze(
+        self,
+        df: pd.DataFrame,
+        code: str,
+        realtime_change_pct: Optional[float] = None,
+    ) -> TrendAnalysisResult:
         """
         分析股票趋势
         
@@ -245,10 +406,13 @@ class StockTrendAnalyzer:
         self._calculate_bias(result)
 
         # 3. 量能分析
-        self._analyze_volume(df, result)
+        self._analyze_volume(df, result, realtime_change_pct=realtime_change_pct)
 
         # 4. 支撑压力分析
         self._analyze_support_resistance(df, result)
+
+        # 4.5 K线结构分析
+        self._analyze_kline_structure(df, result, realtime_change_pct=realtime_change_pct)
 
         # 5. MACD 分析
         self._analyze_macd(df, result)
@@ -406,25 +570,69 @@ class StockTrendAnalyzer:
         if result.ma20 > 0:
             result.bias_ma20 = (price - result.ma20) / result.ma20 * 100
     
-    def _analyze_volume(self, df: pd.DataFrame, result: TrendAnalysisResult) -> None:
+    def _analyze_volume(
+        self,
+        df: pd.DataFrame,
+        result: TrendAnalysisResult,
+        realtime_change_pct: Optional[float] = None,
+    ) -> None:
         """
         分析量能
-        
+
         偏好：缩量回调 > 放量上涨 > 缩量上涨 > 放量下跌
+
+        注意：
+        - 部分实时行情源的 volume 可能是“手”
+        - 历史日线 volume 可能是“股”
+        - 因此计算量比前必须统一成交量单位
         """
-        if len(df) < 5:
+        if df is None or df.empty or len(df) < 6:
+            result.volume_status = VolumeStatus.NORMAL
+            result.volume_ratio_5d = 0.0
+            result.volume_trend = "量能数据不足"
             return
-        
+
         latest = df.iloc[-1]
-        vol_5d_avg = df['volume'].iloc[-6:-1].mean()
-        
-        if vol_5d_avg > 0:
-            result.volume_ratio_5d = float(latest['volume']) / vol_5d_avg
-        
+        prev = df.iloc[-2]
+
+        vol_5d_avg = df["volume"].iloc[-6:-1].mean()
+
+        try:
+            latest_volume_raw = float(latest["volume"])
+            vol_5d_avg = float(vol_5d_avg)
+        except (TypeError, ValueError):
+            result.volume_status = VolumeStatus.NORMAL
+            result.volume_ratio_5d = 0.0
+            result.volume_trend = "量能数据异常"
+            return
+
+        if vol_5d_avg <= 0:
+            result.volume_status = VolumeStatus.NORMAL
+            result.volume_ratio_5d = 0.0
+            result.volume_trend = "5日均量无效"
+            return
+
+        # 关键修复：统一最新成交量与历史均量单位
+        latest_volume = self._normalize_volume_for_ratio(
+            latest_volume=latest_volume_raw,
+            avg_volume=vol_5d_avg,
+        )
+
+        result.volume_ratio_5d = latest_volume / vol_5d_avg
+
         # 判断价格变化
-        prev_close = df.iloc[-2]['close']
-        price_change = (latest['close'] - prev_close) / prev_close * 100
-        
+        try:
+            prev_close = float(prev["close"])
+            latest_close = float(latest["close"])
+            # 判断价格变化：优先使用实时行情 change_pct
+            price_change = self._resolve_price_change_pct(
+                latest=latest,
+                prev=prev,
+                realtime_change_pct=realtime_change_pct,
+            )
+        except (TypeError, ValueError):
+            price_change = 0.0
+
         # 量能状态判断
         if result.volume_ratio_5d >= self.VOLUME_HEAVY_RATIO:
             if price_change > 0:
@@ -433,6 +641,7 @@ class StockTrendAnalyzer:
             else:
                 result.volume_status = VolumeStatus.HEAVY_VOLUME_DOWN
                 result.volume_trend = "放量下跌，注意风险"
+
         elif result.volume_ratio_5d <= self.VOLUME_SHRINK_RATIO:
             if price_change > 0:
                 result.volume_status = VolumeStatus.SHRINK_VOLUME_UP
@@ -440,9 +649,22 @@ class StockTrendAnalyzer:
             else:
                 result.volume_status = VolumeStatus.SHRINK_VOLUME_DOWN
                 result.volume_trend = "缩量回调，洗盘特征明显（好）"
+
         else:
             result.volume_status = VolumeStatus.NORMAL
             result.volume_trend = "量能正常"
+
+        logger.info(
+            "%s 量能分析: latest_volume_raw=%s, latest_volume_used=%.2f, "
+            "vol_5d_avg=%.2f, volume_ratio_5d=%.2f, price_change=%.2f%%, status=%s",
+            result.code,
+            latest_volume_raw,
+            latest_volume,
+            vol_5d_avg,
+            result.volume_ratio_5d,
+            price_change,
+            result.volume_status.value,
+        )
     
     def _analyze_support_resistance(self, df: pd.DataFrame, result: TrendAnalysisResult) -> None:
         """
@@ -476,6 +698,204 @@ class StockTrendAnalyzer:
             recent_high = df['high'].iloc[-20:].max()
             if recent_high > price:
                 result.resistance_levels.append(recent_high)
+
+    def _analyze_kline_structure(
+        self,
+        df: pd.DataFrame,
+        result: TrendAnalysisResult,
+        realtime_change_pct: Optional[float] = None,
+    ) -> None:
+        """
+        分析最新K线结构。
+
+        重点补足原趋势分析没有覆盖的部分：
+        1. 实体大小
+        2. 上下影线
+        3. 收盘位置
+        4. 突破/跌破近20日高低点
+        5. 是否贴近 MA5/MA10/MA20
+        6. 量价配合是否健康
+        """
+        if df is None or df.empty or len(df) < 20:
+            result.kline_summary = "K线数据不足，无法完成结构分析"
+            return
+
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        open_p = float(latest["open"])
+        high_p = float(latest["high"])
+        low_p = float(latest["low"])
+        close_p = float(latest["close"])
+        volume = float(latest["volume"])
+
+        prev_close = float(prev["close"])
+        day_range = max(high_p - low_p, 1e-9)
+
+        body = abs(close_p - open_p)
+        upper_shadow = high_p - max(open_p, close_p)
+        lower_shadow = min(open_p, close_p) - low_p
+
+        body_pct = body / day_range * 100
+        upper_pct = upper_shadow / day_range * 100
+        lower_pct = lower_shadow / day_range * 100
+        close_pos_pct = (close_p - low_p) / day_range * 100
+
+        price_change_pct = self._resolve_price_change_pct(
+            latest=latest,
+            prev=prev,
+            realtime_change_pct=realtime_change_pct,
+        )
+
+        result.candle_body_pct = round(body_pct, 2)
+        result.upper_shadow_pct = round(upper_pct, 2)
+        result.lower_shadow_pct = round(lower_pct, 2)
+        result.close_position_pct = round(close_pos_pct, 2)
+        result.price_change_pct = round(price_change_pct, 2)
+
+        is_red = close_p >= open_p
+        is_green = close_p < open_p
+
+        # === 1. 单根K线类型 ===
+        if body_pct <= 10:
+            candle_type = "十字星/小实体"
+        elif upper_pct >= 45:
+            candle_type = "长上影线"
+        elif lower_pct >= 45:
+            candle_type = "长下影线"
+        elif is_red and body_pct >= 55 and close_pos_pct >= 70:
+            candle_type = "强实体阳线"
+        elif is_green and body_pct >= 55 and close_pos_pct <= 35:
+            candle_type = "强实体阴线"
+        elif is_red:
+            candle_type = "普通阳线"
+        else:
+            candle_type = "普通阴线"
+
+        result.latest_candle_type = candle_type
+
+        # === 2. 量能基准 ===
+        vol_5d_avg = df["volume"].iloc[-6:-1].mean()
+        if vol_5d_avg is not None and vol_5d_avg > 0:
+            volume = self._normalize_volume_for_ratio(volume, vol_5d_avg)
+            volume_ratio_5d = volume / vol_5d_avg
+        else:
+            volume_ratio_5d = 1.0
+
+        # === 3. 近20日突破/跌破 ===
+        prev_20_high = float(df["high"].iloc[-21:-1].max())
+        prev_20_low = float(df["low"].iloc[-21:-1].min())
+
+        result.break_20d_high = close_p > prev_20_high
+        result.break_20d_low = close_p < prev_20_low
+
+        # === 4. 是否贴近均线 ===
+        def _near(price: float, ma: float, tolerance: float = 0.02) -> bool:
+            return ma > 0 and abs(price - ma) / ma <= tolerance
+
+        result.near_ma5 = _near(close_p, result.ma5)
+        result.near_ma10 = _near(close_p, result.ma10)
+        result.near_ma20 = _near(close_p, result.ma20, tolerance=0.025)
+
+        # === 5. 结构信号评分 ===
+        score = 50
+        signals: List[str] = []
+        risks: List[str] = []
+
+        # 正向信号
+        if result.break_20d_high and is_red and close_pos_pct >= 70 and volume_ratio_5d >= 1.2:
+            score += 22
+            signals.append("放量突破近20日高点，且收盘位于日内高位，突破结构偏强")
+
+        if is_red and body_pct >= 55 and close_pos_pct >= 75 and volume_ratio_5d >= 1.1:
+            score += 16
+            signals.append("放量实体阳线，主动买盘较强")
+
+        if lower_pct >= 45 and close_pos_pct >= 60:
+            score += 12
+            signals.append("长下影线收回，盘中下探后有承接")
+
+        if result.near_ma5 and close_p >= result.ma5 and volume_ratio_5d <= 1.1:
+            score += 10
+            signals.append("贴近MA5且未有效跌破，短线支撑仍在")
+
+        if result.near_ma10 and close_p >= result.ma10 and volume_ratio_5d <= 1.0:
+            score += 14
+            signals.append("缩量回踩MA10，符合低吸观察区")
+
+        if result.near_ma20 and close_p >= result.ma20 and volume_ratio_5d <= 1.0:
+            score += 10
+            signals.append("靠近MA20但未跌破，中期支撑暂未破坏")
+
+        # 风险信号
+        if upper_pct >= 45 and volume_ratio_5d >= 1.3:
+            score -= 22
+            risks.append("放量长上影，冲高回落明显，上方抛压较重")
+
+        if is_green and body_pct >= 50 and close_pos_pct <= 35 and volume_ratio_5d >= 1.2:
+            score -= 24
+            risks.append("放量实体阴线，主动卖压较强")
+
+        if close_p < result.ma20 and volume_ratio_5d >= 1.2:
+            score -= 25
+            risks.append("放量跌破MA20，中期趋势支撑被破坏")
+
+        if result.break_20d_low:
+            score -= 20
+            risks.append("跌破近20日低点，短线结构明显转弱")
+
+        if price_change_pct >= 7 and upper_pct >= 35:
+            score -= 12
+            risks.append("大涨后出现明显上影线，短线追高性价比下降")
+
+        if price_change_pct <= -5 and close_pos_pct <= 35:
+            score -= 12
+            risks.append("大跌且收盘靠近低位，弱势未修复")
+
+        # 分数归一化
+        score = max(0, min(100, score))
+        result.kline_structure_score = score
+
+        if score >= 80:
+            label = "强势突破结构"
+        elif score >= 65:
+            label = "偏强结构"
+        elif score >= 50:
+            label = "中性偏强结构"
+        elif score >= 35:
+            label = "中性偏弱结构"
+        else:
+            label = "风险结构"
+
+        result.kline_structure_label = label
+        result.kline_signals = signals
+        result.kline_risks = risks
+
+        # === 6. 生成一句话摘要，方便后续 prompt 直接引用 ===
+        parts = [
+            f"最新K线为{result.latest_candle_type}",
+            f"K线结构={label}",
+            f"结构分={score}/100",
+            f"涨跌幅={result.price_change_pct:.2f}%",
+            f"收盘位置={result.close_position_pct:.1f}%",
+            f"5日量比={volume_ratio_5d:.2f}",
+        ]
+
+        if signals:
+            parts.append("正向信号：" + "；".join(signals[:2]))
+        if risks:
+            parts.append("风险信号：" + "；".join(risks[:2]))
+
+        result.kline_summary = "；".join(parts)
+
+        # for debug
+        logger.info(
+            "%s K线涨跌幅解析: realtime_change_pct=%s, final_price_change_pct=%.2f%%",
+            result.code,
+            realtime_change_pct,
+            result.price_change_pct,
+        )
+
 
     def _analyze_macd(self, df: pd.DataFrame, result: TrendAnalysisResult) -> None:
         """
@@ -724,6 +1144,28 @@ class StockTrendAnalyzer:
         else:
             reasons.append(result.rsi_signal)
 
+        # === K线结构修正（不改变原100分体系，只做小幅加减分）===
+        if result.kline_structure_score >= 75:
+            score += 5
+            reasons.append(f"✅ K线结构偏强：{result.kline_summary}")
+        elif result.kline_structure_score <= 35:
+            score -= 8
+            risks.append(f"⚠️ K线结构偏弱：{result.kline_summary}")
+        elif result.kline_summary:
+            reasons.append(f"ℹ️ K线结构参考：{result.kline_summary}")
+
+        # 强风险信号直接压制进攻性
+        serious_kline_risks = [
+            r for r in result.kline_risks
+            if ("放量跌破MA20" in r) or ("跌破近20日低点" in r) or ("放量实体阴线" in r)
+        ]
+        if serious_kline_risks:
+            score -= 10
+            risks.extend([f"⚠️ {r}" for r in serious_kline_risks[:2]])
+
+        # 分数边界保护
+        score = max(0, min(100, score))
+
         # === 综合判断 ===
         result.signal_score = score
         result.signal_reasons = reasons
@@ -801,7 +1243,11 @@ class StockTrendAnalyzer:
         return "\n".join(lines)
 
 
-def analyze_stock(df: pd.DataFrame, code: str) -> TrendAnalysisResult:
+def analyze_stock(
+    df: pd.DataFrame,
+    code: str,
+    realtime_change_pct: Optional[float] = None,
+) -> TrendAnalysisResult:
     """
     便捷函数：分析单只股票
     

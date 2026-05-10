@@ -304,7 +304,19 @@ class StockAnalysisPipeline:
                     # Issue #234: Augment with realtime for intraday MA calculation
                     if self.config.enable_realtime_quote and realtime_quote:
                         df = self._augment_historical_with_realtime(df, realtime_quote, code)
-                    trend_result = self.trend_analyzer.analyze(df, code)
+
+                    realtime_change_pct = None
+                    if realtime_quote is not None:
+                        realtime_change_pct = getattr(realtime_quote, "change_pct", None)
+                        if realtime_change_pct is None:
+                            realtime_change_pct = getattr(realtime_quote, "change_percent", None)
+
+                    trend_result = self.trend_analyzer.analyze(
+                        df,
+                        code,
+                        realtime_change_pct=realtime_change_pct,
+                    )
+
                     logger.info(f"{stock_name}({code}) 趋势分析: {trend_result.trend_status.value}, "
                               f"买入信号={trend_result.buy_signal.value}, 评分={trend_result.signal_score}")
             except Exception as e:
